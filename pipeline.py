@@ -99,6 +99,7 @@ def process_multi_part_video(
     *,
     output_root: Path,
     selected_parts: tuple[VideoPart, ...] | None = None,
+    note_mode: str | None = None,
     cookies_from_browser: str | None = None,
     on_event: Callable[[str], None] | None = None,
     subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
@@ -109,7 +110,8 @@ def process_multi_part_video(
 
     任何单个分 P 的字幕、模型或文件错误都会被记录，
     不会中断后续分 P。``selected_parts`` 为 ``None`` 时保持原有行为，
-    处理 ``collection`` 中的全部分 P。
+    处理 ``collection`` 中的全部分 P。``note_mode`` 只传给分 P
+    笔记生成，不改变课程合集总结逻辑。
     """
 
     fetch_subtitle = subtitle_fetcher or fetch_video_subtitle
@@ -140,11 +142,13 @@ def process_multi_part_video(
             )
             result.title = video.title
             emit(f"[P{part.page_number:02d}] 正在调用 DeepSeek：{result.title}")
-            markdown = generate_notes(
-                video.subtitle_text,
-                video_title=video.title,
-                video_description=video.description,
-            )
+            note_options = {
+                "video_title": video.title,
+                "video_description": video.description,
+            }
+            if note_mode is not None:
+                note_options["mode"] = note_mode
+            markdown = generate_notes(video.subtitle_text, **note_options)
             result.output_path = save_part_notes(
                 markdown,
                 output_dir=output_dir,

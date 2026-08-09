@@ -14,6 +14,7 @@ from bilibili import (
 )
 from llm import LLMError, generate_study_notes
 from pipeline import process_multi_part_video
+from prompt import get_selectable_note_modes
 from selection import PartSelectionError, select_video_parts
 
 
@@ -27,6 +28,26 @@ def save_study_notes(markdown: str, bvid: str, output_dir: Path = OUTPUT_DIR) ->
     output_path = output_dir / f"{bvid}_study_notes.md"
     output_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
     return output_path
+
+
+def prompt_for_note_mode() -> str | None:
+    """在交互模式中显示可选模式；直接回车表示沿用旧版默认模板。"""
+
+    modes = get_selectable_note_modes()
+    print("请选择笔记模式：")
+    for number, mode in enumerate(modes, start=1):
+        print(f"{number}. {mode.name}（{mode.key}）")
+
+    choice = input("请输入编号或模式名称（直接回车使用默认模式）：").strip().lower()
+    if not choice:
+        return None
+
+    choices = {str(number): mode.key for number, mode in enumerate(modes, start=1)}
+    choices.update({mode.key: mode.key for mode in modes})
+    if choice not in choices:
+        available = "、".join(choices[str(number)] for number in range(1, len(modes) + 1))
+        raise ValueError(f"不支持的笔记模式“{choice}”。可用模式：{available}。")
+    return choices[choice]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--parts",
         metavar="SELECTION",
         help='只处理指定分 P，例如 "1"、"1,3,5" 或 "1,3,5-8"',
+    )
+    parser.add_argument(
+        "--mode",
+        choices=tuple(mode.key for mode in get_selectable_note_modes()),
+        help="笔记生成模式：technical（技术学习）或 course（普通课程笔记）",
     )
     return parser
 
@@ -71,6 +97,7 @@ def main() -> int:
         print(f"错误：{error}", file=sys.stderr)
         return 1
 
+    selected_parts = None
     if collection.is_multi_part:
         print(f"课程：{collection.title}")
         print(f"共 {len(collection.parts)} P：")
@@ -93,11 +120,22 @@ def main() -> int:
             f"P{part.page_number}" for part in selected_parts
         )
         print(f"本次处理：{selected_labels}")
+
+    note_mode = args.mode
+    if interactive_mode and note_mode is None:
+        try:
+            note_mode = prompt_for_note_mode()
+        except ValueError as error:
+            print(f"错误：{error}", file=sys.stderr)
+            return 1
+
+    if collection.is_multi_part:
         try:
             report = process_multi_part_video(
                 collection,
                 output_root=OUTPUT_DIR,
                 selected_parts=selected_parts,
+                note_mode=note_mode,
                 cookies_from_browser=args.cookies_from_browser,
                 on_event=print,
             )
@@ -133,11 +171,13 @@ def main() -> int:
     print("正在调用 DeepSeek 生成学习笔记……")
 
     try:
-        notes = generate_study_notes(
-            result.subtitle_text,
-            video_title=result.title,
-            video_description=result.description,
-        )
+        note_options = {
+            "video_title": result.title,
+            "video_description": result.description,
+        }
+        if note_mode is not None:
+            note_options["mode"] = note_mode
+        notes = generate_study_notes(result.subtitle_text, **note_options)
         output_path = save_study_notes(notes, result.bvid)
     except LLMError as error:
         print(f"错误：{error}", file=sys.stderr)

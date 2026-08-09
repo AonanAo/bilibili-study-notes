@@ -11,7 +11,7 @@
 .
 ├── bilibili.py          # 独立字幕获取模块
 ├── llm.py               # DeepSeek API 调用模块
-├── prompt.py            # 分 P 笔记和课程总结提示词
+├── prompt.py            # 笔记模式、分 P 笔记和课程总结提示词
 ├── selection.py         # 分 P 选择表达式解析与校验
 ├── pipeline.py          # 多 P 容错、文件保存和合集总结流程
 ├── main.py              # 命令行入口
@@ -21,6 +21,7 @@
 └── tests/
     ├── test_bilibili.py
     ├── test_llm.py
+    ├── test_prompt.py
     ├── test_selection.py
     ├── test_main.py
     └── test_pipeline.py
@@ -97,6 +98,26 @@ python main.py "BV1DfrdByE2Hx"
 
 也可以只运行 `python main.py`，然后根据提示粘贴链接。
 
+### 笔记生成模式
+
+使用 `--mode` 可以指定每个视频或分 P 的笔记结构：
+
+| 模式 | 适用内容 | 主要章节 |
+|---|---|---|
+| `technical` | AI、编程和技术教程 | 核心概念、原理解释、实践案例、常见问题、复习问题 |
+| `course` | 普通知识课程和公开课 | 内容概括、核心知识点、关键观点、知识关联、总结 |
+
+例如：
+
+```bash
+python main.py "BV视频编号" --mode technical
+python main.py "BV视频编号" --mode course
+```
+
+不传 `--mode` 时继续使用 v0.1 的原有笔记结构。`academic` 学术阅读模式已经预留配置接口，但当前版本暂不开放选择。
+
+直接执行 `python main.py` 进入交互模式时，可以通过编号选择模式；直接回车使用原有默认模板。
+
 ### 多 P 视频
 
 命令行使用方式不变。直接传入包含多个分 P 的 BV 号：
@@ -114,6 +135,7 @@ python main.py "BV多P视频编号" --parts "3"
 python main.py "BV多P视频编号" --parts "1,3,5"
 python main.py "BV多P视频编号" --parts "1-5"
 python main.py "BV多P视频编号" --parts "1,3,5-8"
+python main.py "BV多P视频编号" --parts "1,3,5-8" --mode technical
 ```
 
 选择表达式支持单个编号、逗号分隔的多个编号和连续范围。重复编号会自动去重，处理顺序始终按视频原始分 P 顺序排列；非法格式或不存在的分 P 会在开始获取字幕前明确提示。
@@ -132,6 +154,8 @@ outputs/
 ```
 
 分 P 标题中不适合文件名的字符会自动替换。某个分 P 无字幕、请求失败或笔记生成失败时，程序会跳过该 P 并继续。
+
+`course` 是单个视频或单个分 P 的笔记模式，只决定每份分 P 笔记的结构。`summary.md` 是所有选中分 P 处理完成后的固定合集总结，不是笔记模式，也不受 `--mode` 控制。
 
 `summary.md` 会读取本次成功写入的分 P 笔记，再调用一次 DeepSeek，包含：
 
@@ -157,6 +181,8 @@ python main.py "https://www.bilibili.com/video/BV1jJ411r7eH" --cookies-from-brow
 > 如果浏览器正在占用 Cookie 数据库，可以先关闭浏览器后再试。不要把 Cookie 发给他人或提交到 Git。
 
 ## Markdown 笔记结构
+
+不传 `--mode` 时沿用下面的默认结构：
 
 ```markdown
 # 视频主题
@@ -199,6 +225,9 @@ notes = generate_study_notes(
     video.subtitle_text,
     video_title=video.title,
     video_description=video.description,
+    mode="technical",
+    # 只在 Python 调用接口中提供；当前命令行不开放额外要求参数。
+    extra_instruction="请重点解释代码实现和设计原因。",
 )
 
 print(notes)
@@ -218,6 +247,8 @@ pytest -q
 - 支持 `https://www.bilibili.com/video/BV...` 形式的链接、带查询参数的链接和直接 BV 号。
 - 单 P 视频继续保存为 `outputs/BV号_study_notes.md`，原有用法不变。
 - 同一 BV 号下的多 P 视频默认自动处理全部分 P，也可以用 `--parts` 选择部分分 P；输入链接中的 `?p=` 不会代替 `--parts`。
+- 支持 `technical` 和 `course` 两种可选笔记模式；不指定时沿用 v0.1 默认模板。
+- `course` 只控制单P笔记结构，`summary.md` 仍使用独立、固定的合集总结流程。
 - 多语言字幕优先返回简体中文，否则返回第一个可用语言。
 - 弹幕不当作字幕。
 - 只处理同一 BV 号内的分 P，不扩展为 UP 主播放列表或其他视频合集。

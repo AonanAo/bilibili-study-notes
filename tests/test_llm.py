@@ -43,6 +43,44 @@ Python 课程
 - 按顺序练习。
 """
 
+VALID_TECHNICAL_NOTES = """# 视频主题
+Python 技术学习
+
+## 核心概念
+- 变量
+
+## 原理解释
+- 名称绑定到数据。
+
+## 实践案例
+- 使用变量保存计数。
+
+## 常见问题
+- 变量名需要先定义。
+
+## 复习问题
+1. 什么是变量？
+"""
+
+VALID_COURSE_NOTES = """# 视频主题
+Python 普通课程
+
+## 内容概括
+- 介绍 Python 基础。
+
+## 核心知识点
+- 变量
+
+## 关键观点
+- 命名需要清晰。
+
+## 知识关联
+- 联系数学中的未知数。
+
+## 总结
+- 理解变量是后续学习的基础。
+"""
+
 
 class FakeCompletions:
     def __init__(self, content: str) -> None:
@@ -138,6 +176,69 @@ def test_generate_notes_rejects_incomplete_markdown(
         llm.generate_study_notes("字幕")
 
 
+@pytest.mark.parametrize(
+    ("mode", "content", "expected_heading"),
+    [
+        ("technical", VALID_TECHNICAL_NOTES, "## 原理解释"),
+        ("course", VALID_COURSE_NOTES, "## 内容概括"),
+    ],
+)
+def test_generate_notes_uses_selected_mode_and_dynamic_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    content: str,
+    expected_heading: str,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = content
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    result = llm.generate_study_notes("课程字幕", mode=mode)
+
+    assert result == content.strip()
+    call = FakeOpenAI.instances[0].chat.completions.calls[0]
+    assert expected_heading in call["messages"][1]["content"]
+
+
+def test_generate_notes_rejects_headings_from_another_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = VALID_NOTES
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    with pytest.raises(llm.InvalidLLMResponseError, match="核心概念"):
+        llm.generate_study_notes("字幕", mode="technical")
+
+
+@pytest.mark.parametrize("mode", ["unknown", "academic"])
+def test_generate_notes_rejects_unavailable_mode(mode: str) -> None:
+    with pytest.raises(llm.InvalidNoteModeError):
+        llm.generate_study_notes("字幕", mode=mode)
+
+
+def test_generate_notes_adds_extra_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = VALID_TECHNICAL_NOTES
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    llm.generate_study_notes(
+        "课程字幕",
+        mode="technical",
+        extra_instruction="请重点解释代码设计原因。",
+    )
+
+    call = FakeOpenAI.instances[0].chat.completions.calls[0]
+    user_prompt = call["messages"][1]["content"]
+    assert "【用户额外学习要求】" in user_prompt
+    assert "请重点解释代码设计原因。" in user_prompt
+
+
 def test_course_summary_prompt_contains_all_part_notes_and_failures() -> None:
     result = build_course_summary_prompt(
         [(1, "变量", "# 视频主题\n变量"), (2, "函数", "# 视频主题\n函数")],
@@ -172,4 +273,3 @@ def test_generate_course_summary_appends_processing_status(
     assert "- 失败：P02 函数：无字幕" in result
     call = FakeOpenAI.instances[0].chat.completions.calls[0]
     assert "P02 函数：无字幕" in call["messages"][1]["content"]
-

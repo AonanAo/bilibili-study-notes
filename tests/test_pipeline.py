@@ -99,7 +99,9 @@ def test_pipeline_only_processes_selected_part_and_keeps_page_number(
     collection = _collection()
     fetched_urls: list[str] = []
     generated_subtitles: list[str] = []
+    generated_modes: list[str | None] = []
     summary_parts: list[tuple[int, str, str]] = []
+    summary_options: dict[str, object] = {}
 
     def fake_fetch(url: str, **_kwargs: object) -> VideoSubtitle:
         fetched_urls.append(url)
@@ -111,21 +113,24 @@ def test_pipeline_only_processes_selected_part_and_keeps_page_number(
             subtitle_text="仅有 P3 字幕",
         )
 
-    def fake_notes(subtitle_text: str, **_kwargs: str) -> str:
+    def fake_notes(subtitle_text: str, **kwargs: str) -> str:
         generated_subtitles.append(subtitle_text)
+        generated_modes.append(kwargs.get("mode"))
         return "# 视频主题\n第三章"
 
     def fake_summary(
         part_notes: list[tuple[int, str, str]],
-        **_kwargs: object,
+        **kwargs: object,
     ) -> str:
         summary_parts.extend(part_notes)
+        summary_options.update(kwargs)
         return "# 视频整体主题\n课程总结"
 
     report = process_multi_part_video(
         collection,
         output_root=tmp_path,
         selected_parts=(collection.parts[2],),
+        note_mode="technical",
         subtitle_fetcher=fake_fetch,
         notes_generator=fake_notes,
         summary_generator=fake_summary,
@@ -134,16 +139,19 @@ def test_pipeline_only_processes_selected_part_and_keeps_page_number(
     output_dir = tmp_path / collection.bvid
     assert fetched_urls == ["https://example.test?p=3"]
     assert generated_subtitles == ["仅有 P3 字幕"]
+    assert generated_modes == ["technical"]
     assert [result.page_number for result in report.parts] == [3]
     assert (output_dir / "P03_第三章.md").exists()
     assert not list(output_dir.glob("P01_*.md"))
     assert not list(output_dir.glob("P02_*.md"))
     assert [part[0] for part in summary_parts] == [3]
+    assert "mode" not in summary_options
 
 
 def test_pipeline_defaults_to_processing_all_parts(tmp_path: Path) -> None:
     collection = _collection()
     fetched_urls: list[str] = []
+    note_kwargs: list[dict[str, str]] = []
 
     def fake_fetch(url: str, **_kwargs: object) -> VideoSubtitle:
         fetched_urls.append(url)
@@ -156,13 +164,18 @@ def test_pipeline_defaults_to_processing_all_parts(tmp_path: Path) -> None:
             subtitle_text=f"P{page_number} 字幕",
         )
 
+    def fake_notes(subtitle_text: str, **kwargs: str) -> str:
+        note_kwargs.append(kwargs)
+        return f"# 视频主题\n{subtitle_text}"
+
     report = process_multi_part_video(
         collection,
         output_root=tmp_path,
         subtitle_fetcher=fake_fetch,
-        notes_generator=lambda text, **_kwargs: f"# 视频主题\n{text}",
+        notes_generator=fake_notes,
         summary_generator=lambda *_args, **_kwargs: "# 视频整体主题\n课程总结",
     )
 
     assert fetched_urls == [part.url for part in collection.parts]
     assert [result.page_number for result in report.parts] == [1, 2, 3]
+    assert all("mode" not in kwargs for kwargs in note_kwargs)

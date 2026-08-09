@@ -17,21 +17,15 @@ from openai import (
 from prompt import (
     COURSE_SUMMARY_SYSTEM_PROMPT,
     STUDY_NOTES_SYSTEM_PROMPT,
+    NoteModeError,
     build_course_summary_prompt,
     build_study_notes_prompt,
+    get_note_mode,
 )
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
-
-REQUIRED_MARKDOWN_HEADINGS = (
-    "# 视频主题",
-    "## 核心知识点",
-    "## 关键观点",
-    "## 与已有知识关联",
-    "## 复习问题",
-)
 
 REQUIRED_SUMMARY_HEADINGS = (
     "# 视频整体主题",
@@ -44,6 +38,10 @@ REQUIRED_SUMMARY_HEADINGS = (
 
 class LLMError(Exception):
     """DeepSeek 笔记生成错误的基类。"""
+
+
+class InvalidNoteModeError(LLMError):
+    """请求了不存在或尚未开放的笔记模式。"""
 
 
 class MissingAPIKeyError(LLMError):
@@ -138,6 +136,8 @@ def generate_study_notes(
     *,
     video_title: str = "",
     video_description: str = "",
+    mode: str | None = None,
+    extra_instruction: str | None = None,
     model: str | None = None,
 ) -> str:
     """调用 DeepSeek，将字幕生成 Markdown 学习笔记。
@@ -148,16 +148,26 @@ def generate_study_notes(
 
     if not isinstance(subtitle_text, str) or not subtitle_text.strip():
         raise LLMError("字幕文本为空，无法生成学习笔记。")
+    if extra_instruction is not None and not isinstance(extra_instruction, str):
+        raise LLMError("额外学习要求必须是字符串或 None。")
+
+    try:
+        note_mode = get_note_mode(mode)
+    except NoteModeError as error:
+        # 对外统一使用 LLMError 体系，便于命令行和 pipeline 处理。
+        raise InvalidNoteModeError(str(error)) from error
 
     user_prompt = build_study_notes_prompt(
         subtitle_text.strip(),
         video_title=video_title.strip(),
         video_description=video_description.strip(),
+        mode=note_mode.key,
+        extra_instruction=(extra_instruction or "").strip(),
     )
     return _request_markdown(
         system_prompt=STUDY_NOTES_SYSTEM_PROMPT,
         user_prompt=user_prompt,
-        required_headings=REQUIRED_MARKDOWN_HEADINGS,
+        required_headings=note_mode.required_headings,
         model=model,
     )
 
