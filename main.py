@@ -14,6 +14,7 @@ from bilibili import (
 )
 from llm import LLMError, generate_study_notes
 from pipeline import process_multi_part_video
+from selection import PartSelectionError, select_video_parts
 
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
@@ -42,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BROWSER",
         help="从已登录 B 站的浏览器读取 Cookie，例如 chrome、edge 或 firefox",
     )
+    parser.add_argument(
+        "--parts",
+        metavar="SELECTION",
+        help='只处理指定分 P，例如 "1"、"1,3,5" 或 "1,3,5-8"',
+    )
     return parser
 
 
@@ -50,6 +56,7 @@ def main() -> int:
 
     args = build_parser().parse_args()
     # 没有传命令行参数时，允许初学者直接运行后粘贴链接。
+    interactive_mode = args.url is None
     video_url = args.url or input("请输入 B 站视频链接或 BV 号：").strip()
 
     try:
@@ -65,11 +72,32 @@ def main() -> int:
         return 1
 
     if collection.is_multi_part:
-        print(f"检测到多 P 视频：{collection.title}，共 {len(collection.parts)} P")
+        print(f"课程：{collection.title}")
+        print(f"共 {len(collection.parts)} P：")
+        for part in collection.parts:
+            print(f"P{part.page_number} {part.title}")
+
+        selection = args.parts
+        if interactive_mode and selection is None:
+            selection = input(
+                '请选择需要生成笔记的分 P（例如 1,3,5-8，直接回车处理全部）：'
+            ).strip()
+
+        try:
+            selected_parts = select_video_parts(collection.parts, selection)
+        except PartSelectionError as error:
+            print(f"错误：{error}", file=sys.stderr)
+            return 1
+
+        selected_labels = ", ".join(
+            f"P{part.page_number}" for part in selected_parts
+        )
+        print(f"本次处理：{selected_labels}")
         try:
             report = process_multi_part_video(
                 collection,
                 output_root=OUTPUT_DIR,
+                selected_parts=selected_parts,
                 cookies_from_browser=args.cookies_from_browser,
                 on_event=print,
             )

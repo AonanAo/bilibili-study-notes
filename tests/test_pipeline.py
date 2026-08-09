@@ -92,3 +92,77 @@ def test_multi_part_processing_skips_failures_and_creates_summary(
     assert any("P03 第三章" in item for item in summary_input["failed_parts"])
     assert any("已继续" in event for event in events)
 
+
+def test_pipeline_only_processes_selected_part_and_keeps_page_number(
+    tmp_path: Path,
+) -> None:
+    collection = _collection()
+    fetched_urls: list[str] = []
+    generated_subtitles: list[str] = []
+    summary_parts: list[tuple[int, str, str]] = []
+
+    def fake_fetch(url: str, **_kwargs: object) -> VideoSubtitle:
+        fetched_urls.append(url)
+        return VideoSubtitle(
+            bvid=collection.bvid,
+            title="第三章",
+            description="",
+            subtitle_language="zh-CN",
+            subtitle_text="仅有 P3 字幕",
+        )
+
+    def fake_notes(subtitle_text: str, **_kwargs: str) -> str:
+        generated_subtitles.append(subtitle_text)
+        return "# 视频主题\n第三章"
+
+    def fake_summary(
+        part_notes: list[tuple[int, str, str]],
+        **_kwargs: object,
+    ) -> str:
+        summary_parts.extend(part_notes)
+        return "# 视频整体主题\n课程总结"
+
+    report = process_multi_part_video(
+        collection,
+        output_root=tmp_path,
+        selected_parts=(collection.parts[2],),
+        subtitle_fetcher=fake_fetch,
+        notes_generator=fake_notes,
+        summary_generator=fake_summary,
+    )
+
+    output_dir = tmp_path / collection.bvid
+    assert fetched_urls == ["https://example.test?p=3"]
+    assert generated_subtitles == ["仅有 P3 字幕"]
+    assert [result.page_number for result in report.parts] == [3]
+    assert (output_dir / "P03_第三章.md").exists()
+    assert not list(output_dir.glob("P01_*.md"))
+    assert not list(output_dir.glob("P02_*.md"))
+    assert [part[0] for part in summary_parts] == [3]
+
+
+def test_pipeline_defaults_to_processing_all_parts(tmp_path: Path) -> None:
+    collection = _collection()
+    fetched_urls: list[str] = []
+
+    def fake_fetch(url: str, **_kwargs: object) -> VideoSubtitle:
+        fetched_urls.append(url)
+        page_number = int(url.rsplit("=", 1)[1])
+        return VideoSubtitle(
+            bvid=collection.bvid,
+            title=f"第 {page_number} 章",
+            description="",
+            subtitle_language="zh-CN",
+            subtitle_text=f"P{page_number} 字幕",
+        )
+
+    report = process_multi_part_video(
+        collection,
+        output_root=tmp_path,
+        subtitle_fetcher=fake_fetch,
+        notes_generator=lambda text, **_kwargs: f"# 视频主题\n{text}",
+        summary_generator=lambda *_args, **_kwargs: "# 视频整体主题\n课程总结",
+    )
+
+    assert fetched_urls == [part.url for part in collection.parts]
+    assert [result.page_number for result in report.parts] == [1, 2, 3]

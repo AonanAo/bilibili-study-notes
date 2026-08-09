@@ -12,6 +12,7 @@
 ├── bilibili.py          # 独立字幕获取模块
 ├── llm.py               # DeepSeek API 调用模块
 ├── prompt.py            # 分 P 笔记和课程总结提示词
+├── selection.py         # 分 P 选择表达式解析与校验
 ├── pipeline.py          # 多 P 容错、文件保存和合集总结流程
 ├── main.py              # 命令行入口
 ├── outputs/             # 生成的 Markdown 学习笔记
@@ -20,6 +21,7 @@
 └── tests/
     ├── test_bilibili.py
     ├── test_llm.py
+    ├── test_selection.py
     ├── test_main.py
     └── test_pipeline.py
 ```
@@ -103,7 +105,20 @@ python main.py "BV1DfrdByE2Hx"
 python main.py "BV多P视频编号" --cookies-from-browser chrome
 ```
 
-程序会自动获取所有分 P，每个分 P 独立执行“字幕 → DeepSeek → Markdown”，不会把所有原始字幕合并成一次请求。
+默认情况下，程序会自动获取所有分 P，每个分 P 独立执行“字幕 → DeepSeek → Markdown”，不会把所有原始字幕合并成一次请求。
+
+使用 `--parts` 可以只生成指定分 P 的笔记：
+
+```bash
+python main.py "BV多P视频编号" --parts "3"
+python main.py "BV多P视频编号" --parts "1,3,5"
+python main.py "BV多P视频编号" --parts "1-5"
+python main.py "BV多P视频编号" --parts "1,3,5-8"
+```
+
+选择表达式支持单个编号、逗号分隔的多个编号和连续范围。重复编号会自动去重，处理顺序始终按视频原始分 P 顺序排列；非法格式或不存在的分 P 会在开始获取字幕前明确提示。
+
+直接执行 `python main.py` 进入交互模式时，程序会先显示全部分 P 标题，再询问需要处理的分 P。直接回车仍然处理全部分 P。
 
 输出结构：
 
@@ -202,7 +217,7 @@ pytest -q
 
 - 支持 `https://www.bilibili.com/video/BV...` 形式的链接、带查询参数的链接和直接 BV 号。
 - 单 P 视频继续保存为 `outputs/BV号_study_notes.md`，原有用法不变。
-- 同一 BV 号下的多 P 视频会自动全部处理，即使输入链接带有 `?p=` 也会处理该 BV 的所有分 P。
+- 同一 BV 号下的多 P 视频默认自动处理全部分 P，也可以用 `--parts` 选择部分分 P；输入链接中的 `?p=` 不会代替 `--parts`。
 - 多语言字幕优先返回简体中文，否则返回第一个可用语言。
 - 弹幕不当作字幕。
 - 只处理同一 BV 号内的分 P，不扩展为 UP 主播放列表或其他视频合集。

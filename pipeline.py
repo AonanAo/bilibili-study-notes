@@ -11,6 +11,7 @@ from bilibili import (
     BilibiliError,
     NoSubtitleError,
     VideoCollection,
+    VideoPart,
     VideoSubtitle,
     fetch_video_subtitle,
 )
@@ -97,6 +98,7 @@ def process_multi_part_video(
     collection: VideoCollection,
     *,
     output_root: Path,
+    selected_parts: tuple[VideoPart, ...] | None = None,
     cookies_from_browser: str | None = None,
     on_event: Callable[[str], None] | None = None,
     subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
@@ -106,7 +108,8 @@ def process_multi_part_video(
     """逐 P 生成笔记，然后读取成功文件生成合集总结。
 
     任何单个分 P 的字幕、模型或文件错误都会被记录，
-    不会中断后续分 P。
+    不会中断后续分 P。``selected_parts`` 为 ``None`` 时保持原有行为，
+    处理 ``collection`` 中的全部分 P。
     """
 
     fetch_subtitle = subtitle_fetcher or fetch_video_subtitle
@@ -117,14 +120,18 @@ def process_multi_part_video(
     output_dir = output_root / collection.bvid
     output_dir.mkdir(parents=True, exist_ok=True)
     results: list[PartProcessingResult] = []
-    total = len(collection.parts)
+    parts_to_process = selected_parts if selected_parts is not None else collection.parts
+    total = len(parts_to_process)
 
-    for part in collection.parts:
+    for position, part in enumerate(parts_to_process, start=1):
         result = PartProcessingResult(
             page_number=part.page_number,
             title=part.title,
         )
-        emit(f"[P{part.page_number:02d}/{total:02d}] 正在获取字幕……")
+        emit(
+            f"[P{part.page_number:02d}] 正在获取字幕"
+            f"（本次 {position}/{total}）……"
+        )
 
         try:
             video = fetch_subtitle(
