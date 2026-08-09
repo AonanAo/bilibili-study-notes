@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+import llm
+from prompt import build_course_summary_prompt, build_study_notes_prompt
+
+
+VALID_NOTES = """# 视频主题
+Python 基础
+
+## 核心知识点
+### 1. 变量
+- 定义：保存数据的名称。
+- 解释：可以在代码中引用数据。
+- 重要程度：高，是基础概念。
+
+## 关键观点
+- 变量需要有清晰命名。
+
+## 与已有知识关联
+- 可以联系数学中的未知数。
+
+## 复习问题
+1. 什么是变量？
+"""
+
+VALID_SUMMARY = """# 视频整体主题
+Python 课程
+
+## 核心知识体系
+- 从变量到函数。
+
+## 各章节关系
+- P01 是 P02 的基础。
+
+## 关键概念
+- 变量
+
+## 学习建议
+- 按顺序练习。
+"""
+
+
+class FakeCompletions:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs: object) -> SimpleNamespace:
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))]
+        )
+
+
+class FakeOpenAI:
+    content = VALID_NOTES
+    instances: list["FakeOpenAI"] = []
+
+    def __init__(self, *, api_key: str, base_url: str) -> None:
+        self.api_key = api_key
+        self.base_url = base_url
+        self.chat = SimpleNamespace(completions=FakeCompletions(self.content))
+        self.instances.append(self)
+
+
+def test_prompt_contains_video_information_and_subtitle() -> None:
+    result = build_study_notes_prompt(
+        "这是字幕。",
+        video_title="测试标题",
+        video_description="测试简介",
+    )
+
+    assert "测试标题" in result
+    assert "测试简介" in result
+    assert "这是字幕。" in result
+    assert "# 视频主题" in result
+    assert "## 复习问题" in result
+
+
+def test_generate_notes_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    with pytest.raises(llm.MissingAPIKeyError, match="DEEPSEEK_API_KEY"):
+        llm.generate_study_notes("有效字幕")
+
+
+def test_generate_notes_calls_deepseek_and_returns_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = f"```markdown\n{VALID_NOTES}\n```"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    result = llm.generate_study_notes(
+        "Python 变量字幕",
+        video_title="Python 入门",
+    )
+
+    assert result == VALID_NOTES.strip()
+    client = FakeOpenAI.instances[0]
+    assert client.api_key == "test-key"
+    assert client.base_url == "https://api.deepseek.com"
+    call = client.chat.completions.calls[0]
+    assert call["model"] == "deepseek-v4-flash"
+    assert call["stream"] is False
+    assert "Python 变量字幕" in call["messages"][1]["content"]
+
+
+def test_generate_notes_allows_model_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = VALID_NOTES
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    llm.generate_study_notes("字幕")
+
+    call = FakeOpenAI.instances[0].chat.completions.calls[0]
+    assert call["model"] == "deepseek-v4-pro"
+
+
+def test_generate_notes_rejects_incomplete_markdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = "# 视频主题\n只有一个章节"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    with pytest.raises(llm.InvalidLLMResponseError, match="缺少必要章节"):
+        llm.generate_study_notes("字幕")
+
+
+def test_course_summary_prompt_contains_all_part_notes_and_failures() -> None:
+    result = build_course_summary_prompt(
+        [(1, "变量", "# 视频主题\n变量"), (2, "函数", "# 视频主题\n函数")],
+        course_title="Python 课程",
+        failed_parts=["P03 类：无字幕"],
+    )
+
+    assert "Python 课程" in result
+    assert "P01 变量" in result
+    assert "P02 函数" in result
+    assert "P03 类：无字幕" in result
+    assert "# 视频整体主题" in result
+
+
+def test_generate_course_summary_appends_processing_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = VALID_SUMMARY
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    result = llm.generate_course_summary(
+        [(1, "变量", VALID_NOTES)],
+        course_title="Python 课程",
+        failed_parts=["P02 函数：无字幕"],
+    )
+
+    assert "## 处理状态" in result
+    assert "- 成功：P01 变量" in result
+    assert "- 失败：P02 函数：无字幕" in result
+    call = FakeOpenAI.instances[0].chat.completions.calls[0]
+    assert "P02 函数：无字幕" in call["messages"][1]["content"]
+

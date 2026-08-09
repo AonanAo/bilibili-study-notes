@@ -1,0 +1,15 @@
+
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Cookie 文件包含登录信息，绝对不要提交到 Git。
+cookies.txt
+.env
+
+# 学习笔记是运行程序后生成的文件。
+outputs/
+
+
+
