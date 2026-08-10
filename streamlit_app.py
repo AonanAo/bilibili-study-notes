@@ -1,4 +1,4 @@
-"""v0.2.3.2 Streamlit 入口：选择参数并调用学习笔记生成流程。"""
+"""v0.2.3 Streamlit 入口：生成、展示并下载学习笔记。"""
 
 from __future__ import annotations
 
@@ -32,6 +32,97 @@ def _format_note_mode(mode: web_service.NoteMode | None) -> str:
     return f"{mode.name}（{mode.key}）"
 
 
+def _render_download_button(
+    part: web_service.WebPartResult,
+    *,
+    key: str,
+) -> None:
+    """为已经读取成功的 Markdown 笔记显示下载按钮。"""
+
+    if part.markdown is None or part.filename is None:
+        return
+    st.download_button(
+        "下载 Markdown",
+        data=part.markdown,
+        file_name=part.filename,
+        mime="text/markdown",
+        key=key,
+    )
+
+
+def render_generation_result(result: web_service.WebGenerationResult) -> None:
+    """展示单 P、多 P 以及合集总结的结构化处理结果。"""
+
+    st.markdown("### 生成结果")
+
+    if not result.is_multi_part:
+        part = result.parts[0]
+        if part.succeeded:
+            st.success(f"P{part.page_number} {part.title}：生成成功")
+            st.markdown(part.markdown)
+            _render_download_button(part, key="download_single_part")
+        elif part.error_type == "no_subtitle":
+            st.warning(f"P{part.page_number} {part.title}：{part.error}")
+        else:
+            st.error(f"P{part.page_number} {part.title}：生成失败：{part.error}")
+        return
+
+    st.write(
+        f"成功 {result.succeeded_count} P　｜　"
+        f"无字幕 {result.no_subtitle_count} P　｜　"
+        f"生成失败 {result.failed_count} P"
+    )
+
+    successful_parts = tuple(part for part in result.parts if part.succeeded)
+    no_subtitle_parts = tuple(
+        part for part in result.parts if part.error_type == "no_subtitle"
+    )
+    failed_parts = tuple(
+        part for part in result.parts if part.error_type == "processing_failed"
+    )
+
+    st.markdown("#### 成功分P")
+    if not successful_parts:
+        st.caption("本次没有成功生成的分P笔记。")
+    for part in successful_parts:
+        with st.expander(f"P{part.page_number} {part.title}"):
+            st.markdown(part.markdown)
+            _render_download_button(
+                part,
+                key=f"download_part_{part.page_number}",
+            )
+
+    st.markdown("#### 无字幕分P")
+    if not no_subtitle_parts:
+        st.caption("本次没有无字幕分P。")
+    for part in no_subtitle_parts:
+        st.warning(f"P{part.page_number} {part.title}：{part.error}")
+
+    st.markdown("#### 生成失败分P")
+    if not failed_parts:
+        st.caption("本次没有生成失败分P。")
+    for part in failed_parts:
+        st.error(f"P{part.page_number} {part.title}：{part.error}")
+
+    st.markdown("#### 合集总结")
+    if result.summary_markdown is not None:
+        st.success("summary.md 生成成功")
+        st.markdown(result.summary_markdown)
+        st.download_button(
+            "下载 summary.md",
+            data=result.summary_markdown,
+            file_name=result.summary_filename or "summary.md",
+            mime="text/markdown",
+            key="download_summary",
+        )
+    elif result.summary_error is not None:
+        st.error(f"summary.md 生成失败或无法读取：{result.summary_error}")
+        if successful_parts:
+            st.caption("成功生成的分P笔记已保留，仍可查看和下载。")
+    else:
+        st.caption("本次没有生成合集总结。")
+
+
 def render_generation_form(video_info: web_service.VideoCollection) -> None:
     """收集分 P、笔记模式和额外要求，并交给网页适配层。"""
 
@@ -56,24 +147,34 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
         )
         generate_submitted = st.form_submit_button("生成学习笔记", type="primary")
 
-    if not generate_submitted:
-        return
+    if generate_submitted:
+        st.session_state.generation_result = None
+        generation_status = st.status("正在准备生成学习笔记……", expanded=True)
 
-    try:
-        selected_parts = web_service.select_parts(video_info, part_selection)
-        st.session_state.generation_result = web_service.generate_notes(
-            video_info,
-            selected_parts=selected_parts,
-            note_mode=note_mode.key if note_mode is not None else None,
-            extra_instruction=extra_instruction.strip() or None,
-        )
-    except web_service.PartSelectionError as error:
-        st.error(f"分P选择错误：{error}")
-    except (web_service.BilibiliError, web_service.LLMError, OSError) as error:
-        st.error(f"生成失败：{error}")
-    else:
-        st.success("学习笔记生成流程已执行完毕，请在 outputs 目录查看结果。")
-        st.caption("Markdown 在线展示、详细状态和下载功能将在 v0.2.3.3 加入。")
+        def show_event(message: str) -> None:
+            # 页面只显示 pipeline 发来的文字，不解析或依赖事件格式。
+            generation_status.write(message)
+
+        try:
+            selected_parts = web_service.select_parts(video_info, part_selection)
+            st.session_state.generation_result = web_service.generate_notes(
+                video_info,
+                selected_parts=selected_parts,
+                note_mode=note_mode.key if note_mode is not None else None,
+                extra_instruction=extra_instruction.strip() or None,
+                on_event=show_event,
+            )
+        except web_service.PartSelectionError as error:
+            generation_status.update(label="分P选择失败", state="error")
+            st.error(f"分P选择错误：{error}")
+        except (web_service.BilibiliError, web_service.LLMError, OSError) as error:
+            generation_status.update(label="生成流程失败", state="error")
+            st.error(f"生成失败：{error}")
+        else:
+            generation_status.update(label="生成流程已完成", state="complete")
+
+    if st.session_state.generation_result is not None:
+        render_generation_result(st.session_state.generation_result)
 
 
 st.set_page_config(

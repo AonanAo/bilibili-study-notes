@@ -131,6 +131,9 @@ def test_multi_part_processing_skips_failures_and_creates_summary(
 
     assert report.succeeded_count == 1
     assert report.failed_count == 2
+    assert report.parts[0].error_type is None
+    assert report.parts[1].error_type == "no_subtitle"
+    assert report.parts[2].error_type == "processing_failed"
     assert report.summary_path == tmp_path / "BV1DfrdByE2Hx" / "summary.md"
     assert report.summary_path.exists()
     assert (tmp_path / "BV1DfrdByE2Hx" / "P01_第一章.md").exists()
@@ -281,5 +284,6 @@ def test_pipeline_defaults_to_processing_all_parts(tmp_path: Path) -> None:
 
     assert fetched_urls == [part.url for part in collection.parts]
     assert [result.page_number for result in report.parts] == [1, 2, 3]
+    assert all(result.error_type is None for result in report.parts)
     assert all("mode" not in kwargs for kwargs in note_kwargs)
     assert all("extra_instruction" not in kwargs for kwargs in note_kwargs)

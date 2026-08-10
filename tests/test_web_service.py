@@ -5,7 +5,15 @@ from pathlib import Path
 import pytest
 
 import web_service
-from bilibili import BilibiliFetchError, VideoCollection, VideoPart
+from bilibili import (
+    BilibiliFetchError,
+    NoSubtitleError,
+    VideoCollection,
+    VideoPart,
+    VideoSubtitle,
+)
+from llm import LLMError
+from pipeline import MultiPartReport, PartProcessingResult, SinglePartReport
 
 
 def _collection(*, part_count: int) -> VideoCollection:
@@ -127,13 +135,24 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
     tmp_path: Path,
 ) -> None:
     collection = _collection(part_count=1)
-    expected = object()
     received: dict[str, object] = {}
+    events: list[str] = []
+    on_event = events.append
+    output_path = tmp_path / "BV1DfrdByE2Hx_study_notes.md"
+    output_path.write_text("# 视频主题\n单P笔记\n", encoding="utf-8")
+    video = VideoSubtitle(
+        bvid=collection.bvid,
+        title="真实视频标题",
+        description="真实简介",
+        subtitle_language="zh-CN",
+        subtitle_text="字幕",
+    )
 
     def fake_process(video_info, **kwargs):
         received["video_info"] = video_info
         received.update(kwargs)
-        return expected
+        kwargs["on_event"]("单P事件")
+        return SinglePartReport(video=video, output_path=output_path)
 
     monkeypatch.setattr(web_service, "process_single_part_video", fake_process)
 
@@ -143,15 +162,21 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
         note_mode="technical",
         extra_instruction="重点解释原理。",
         output_root=tmp_path,
+        on_event=on_event,
     )
 
-    assert result is expected
-    assert received == {
-        "video_info": collection,
-        "output_root": tmp_path,
-        "note_mode": "technical",
-        "extra_instruction": "重点解释原理。",
-    }
+    assert received["video_info"] is collection
+    assert received["output_root"] == tmp_path
+    assert received["note_mode"] == "technical"
+    assert received["extra_instruction"] == "重点解释原理。"
+    assert received["on_event"] is on_event
+    assert events == ["单P事件"]
+    assert isinstance(result, web_service.WebGenerationResult)
+    assert result.is_multi_part is False
+    assert result.succeeded_count == 1
+    assert result.parts[0].title == "真实视频标题"
+    assert result.parts[0].markdown == "# 视频主题\n单P笔记\n"
+    assert result.parts[0].filename == output_path.name
 
 
 def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
@@ -160,13 +185,31 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
 ) -> None:
     collection = _collection(part_count=3)
     selected_parts = (collection.parts[1],)
-    expected = object()
     received: dict[str, object] = {}
+    events: list[str] = []
+    on_event = events.append
+    output_dir = tmp_path / collection.bvid
+    output_dir.mkdir()
+    part_path = output_dir / "P02_第_2_章.md"
+    part_path.write_text("# 视频主题\n第二章\n", encoding="utf-8")
+    summary_path = output_dir / "summary.md"
+    summary_path.write_text("# 视频整体主题\n合集总结\n", encoding="utf-8")
 
     def fake_process(video_info, **kwargs):
         received["video_info"] = video_info
         received.update(kwargs)
-        return expected
+        kwargs["on_event"]("多P事件")
+        return MultiPartReport(
+            output_dir=output_dir,
+            parts=(
+                PartProcessingResult(
+                    page_number=2,
+                    title="第 2 章",
+                    output_path=part_path,
+                ),
+            ),
+            summary_path=summary_path,
+        )
 
     monkeypatch.setattr(web_service, "process_multi_part_video", fake_process)
 
@@ -176,13 +219,159 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
         note_mode="course",
         extra_instruction="关注关键观点。",
         output_root=tmp_path,
+        on_event=on_event,
     )
 
-    assert result is expected
-    assert received == {
-        "video_info": collection,
-        "selected_parts": selected_parts,
-        "output_root": tmp_path,
-        "note_mode": "course",
-        "extra_instruction": "关注关键观点。",
-    }
+    assert received["video_info"] is collection
+    assert received["selected_parts"] == selected_parts
+    assert received["output_root"] == tmp_path
+    assert received["note_mode"] == "course"
+    assert received["extra_instruction"] == "关注关键观点。"
+    assert received["on_event"] is on_event
+    assert events == ["多P事件"]
+    assert result.is_multi_part is True
+    assert result.succeeded_count == 1
+    assert result.parts[0].markdown == "# 视频主题\n第二章\n"
+    assert result.parts[0].filename == part_path.name
+    assert result.summary_markdown == "# 视频整体主题\n合集总结\n"
+    assert result.summary_filename == "summary.md"
+
+
+def test_generate_notes_converts_single_part_no_subtitle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+
+    def fake_process(*_args, **_kwargs):
+        raise NoSubtitleError("该视频没有字幕", video_title="真实标题")
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_process)
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        output_root=tmp_path,
+    )
+
+    assert result.succeeded_count == 0
+    assert result.no_subtitle_count == 1
+    assert result.failed_count == 0
+    assert result.parts[0].title == "真实标题"
+    assert result.parts[0].error_type == "no_subtitle"
+    assert "没有字幕" in result.parts[0].error
+
+
+def test_generate_notes_converts_single_part_processing_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+
+    def fake_process(*_args, **_kwargs):
+        raise LLMError("模型生成失败")
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_process)
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        output_root=tmp_path,
+    )
+
+    assert result.succeeded_count == 0
+    assert result.no_subtitle_count == 0
+    assert result.failed_count == 1
+    assert result.parts[0].error_type == "processing_failed"
+    assert result.parts[0].error == "模型生成失败"
+
+
+def test_generate_notes_converts_multi_part_statuses_and_summary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=3)
+    output_dir = tmp_path / collection.bvid
+    output_dir.mkdir()
+    success_path = output_dir / "P01_第一章.md"
+    success_path.write_text("# 视频主题\n第一章\n", encoding="utf-8")
+
+    report = MultiPartReport(
+        output_dir=output_dir,
+        parts=(
+            PartProcessingResult(1, "第一章", output_path=success_path),
+            PartProcessingResult(
+                2,
+                "第二章",
+                error="无字幕，已跳过",
+                error_type="no_subtitle",
+            ),
+            PartProcessingResult(
+                3,
+                "第三章",
+                error="模型生成失败",
+                error_type="processing_failed",
+            ),
+        ),
+        summary_path=None,
+        summary_error="课程总结生成失败",
+    )
+    monkeypatch.setattr(
+        web_service,
+        "process_multi_part_video",
+        lambda *_args, **_kwargs: report,
+    )
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        output_root=tmp_path,
+    )
+
+    assert result.succeeded_count == 1
+    assert result.no_subtitle_count == 1
+    assert result.failed_count == 1
+    assert result.parts[0].markdown == "# 视频主题\n第一章\n"
+    assert result.parts[1].error_type == "no_subtitle"
+    assert result.parts[2].error_type == "processing_failed"
+    assert result.summary_markdown is None
+    assert result.summary_error == "课程总结生成失败"
+
+
+def test_generate_notes_isolates_markdown_read_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=2)
+    output_dir = tmp_path / collection.bvid
+    missing_part_path = output_dir / "P01_不存在.md"
+    missing_summary_path = output_dir / "summary.md"
+    report = MultiPartReport(
+        output_dir=output_dir,
+        parts=(
+            PartProcessingResult(
+                page_number=1,
+                title="第一章",
+                output_path=missing_part_path,
+            ),
+        ),
+        summary_path=missing_summary_path,
+    )
+    monkeypatch.setattr(
+        web_service,
+        "process_multi_part_video",
+        lambda *_args, **_kwargs: report,
+    )
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        output_root=tmp_path,
+    )
+
+    assert result.parts[0].error_type == "processing_failed"
+    assert "读取已生成笔记失败" in result.parts[0].error
+    assert result.parts[0].filename == missing_part_path.name
+    assert result.summary_markdown is None
+    assert result.summary_filename == "summary.md"
+    assert "读取 summary.md 失败" in result.summary_error

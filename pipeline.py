@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from bilibili import (
     BilibiliError,
@@ -20,6 +20,7 @@ from llm import LLMError, generate_course_summary, generate_study_notes
 
 # Windows/macOS/Linux 都不适合出现在文件名中的字符。
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+PartErrorType = Literal["no_subtitle", "processing_failed"]
 
 
 @dataclass
@@ -30,6 +31,7 @@ class PartProcessingResult:
     title: str
     output_path: Path | None = None
     error: str | None = None
+    error_type: PartErrorType | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -234,10 +236,12 @@ def process_multi_part_video(
         except NoSubtitleError as error:
             result.title = error.video_title or result.title
             result.error = f"无字幕，已跳过：{error}"
+            result.error_type = "no_subtitle"
             emit(f"[P{part.page_number:02d}] {result.error}")
         except (BilibiliError, LLMError, OSError) as error:
             # 一个 P 失败时只记录，继续处理下一个 P。
             result.error = str(error)
+            result.error_type = "processing_failed"
             emit(f"[P{part.page_number:02d}] 处理失败，已继续：{error}")
 
         results.append(result)
@@ -252,6 +256,7 @@ def process_multi_part_video(
             markdown = result.output_path.read_text(encoding="utf-8")
         except OSError as error:
             result.error = f"读取已生成笔记失败：{error}"
+            result.error_type = "processing_failed"
             emit(f"[P{result.page_number:02d}] {result.error}")
             continue
         part_notes.append((result.page_number, result.title, markdown))
