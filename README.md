@@ -15,6 +15,8 @@
 ├── selection.py         # 分 P 选择表达式解析与校验
 ├── pipeline.py          # 多 P 容错、文件保存和合集总结流程
 ├── main.py              # 命令行入口
+├── web_service.py       # 网页与现有视频解析能力之间的轻量适配层
+├── streamlit_app.py     # Streamlit 网页入口
 ├── outputs/             # 生成的 Markdown 学习笔记
 ├── requirements.txt     # 运行依赖
 ├── requirements-dev.txt # 测试依赖
@@ -24,7 +26,8 @@
     ├── test_prompt.py
     ├── test_selection.py
     ├── test_main.py
-    └── test_pipeline.py
+    ├── test_pipeline.py
+    └── test_web_service.py
 ```
 
 ## 环境要求
@@ -97,6 +100,23 @@ python main.py "BV1DfrdByE2Hx"
 ```
 
 也可以只运行 `python main.py`，然后根据提示粘贴链接。
+
+## 网页预览（v0.2.3.1）
+
+安装依赖后启动 Streamlit：
+
+```bash
+streamlit run streamlit_app.py
+```
+
+浏览器会打开本地页面。输入 B 站视频链接或 BV 号并点击“解析视频”，页面会展示：
+
+- 视频或课程标题
+- BV号
+- 视频简介
+- 全部分P编号和标题
+
+v0.2.3.1 的网页只验证“网页入口 → 现有视频解析能力”链路，暂不提供 Cookie、字幕获取、DeepSeek调用、分P选择或学习笔记生成。使用这个网页预览功能不需要配置 DeepSeek API Key；命令行笔记生成仍保持原有用法。
 
 ### 笔记生成模式
 
@@ -254,5 +274,6 @@ pytest -q
 - 只处理同一 BV 号内的分 P，不扩展为 UP 主播放列表或其他视频合集。
 - 不会下载视频或音频文件。
 - DeepSeek 返回的 Markdown 必须包含所有约定章节，否则程序会明确报错且不会保存不完整文件。
-- 当前不包含界面、数据库或 RAG。
+- 当前提供只解析和展示视频信息的 Streamlit 预览页面，尚未在网页中接入笔记生成。
+- 当前不包含数据库或 RAG。
 - B 站接口会变化；遇到解析问题时，先执行 `python -m pip install -U yt-dlp`。

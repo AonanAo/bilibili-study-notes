@@ -1,4 +1,4 @@
-"""多 P 视频学习笔记的处理流程。"""
+"""单 P 与多 P 视频学习笔记的处理流程。"""
 
 from __future__ import annotations
 
@@ -34,6 +34,14 @@ class PartProcessingResult:
     @property
     def succeeded(self) -> bool:
         return self.output_path is not None and self.error is None
+
+
+@dataclass(frozen=True)
+class SinglePartReport:
+    """单 P 视频的处理结果。"""
+
+    video: VideoSubtitle
+    output_path: Path
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,20 @@ def save_part_notes(
     return output_path
 
 
+def save_single_part_notes(
+    markdown: str,
+    *,
+    output_root: Path,
+    bvid: str,
+) -> Path:
+    """按现有单 P 规则保存为 ``BV号_study_notes.md``。"""
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_path = output_root / f"{bvid}_study_notes.md"
+    output_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
+    return output_path
+
+
 def save_course_summary(markdown: str, *, output_dir: Path) -> Path:
     """保存多 P 课程总结。"""
 
@@ -94,12 +116,63 @@ def _failure_label(result: PartProcessingResult) -> str:
     return f"P{result.page_number:02d} {result.title}：{result.error or '未知错误'}"
 
 
+def process_single_part_video(
+    collection: VideoCollection,
+    *,
+    output_root: Path,
+    note_mode: str | None = None,
+    extra_instruction: str | None = None,
+    cookies_from_browser: str | None = None,
+    on_event: Callable[[str], None] | None = None,
+    subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
+    notes_generator: Callable[..., str] | None = None,
+) -> SinglePartReport:
+    """处理单 P 视频，供命令行之外的入口复用现有生成能力。
+
+    该函数不改变命令行当前行为，也不参与多 P 的错误隔离与合集总结。
+    """
+
+    if len(collection.parts) != 1:
+        raise ValueError("单 P 处理流程只能接收包含一个分 P 的视频信息。")
+
+    fetch_subtitle = subtitle_fetcher or fetch_video_subtitle
+    generate_notes = notes_generator or generate_study_notes
+    emit = on_event or (lambda _message: None)
+    part = collection.parts[0]
+
+    emit("正在获取视频字幕……")
+    video = fetch_subtitle(
+        part.url,
+        cookies_from_browser=cookies_from_browser,
+    )
+    emit(f"正在调用 DeepSeek：{video.title}")
+
+    note_options = {
+        "video_title": video.title,
+        "video_description": video.description,
+    }
+    if note_mode is not None:
+        note_options["mode"] = note_mode
+    if extra_instruction is not None:
+        note_options["extra_instruction"] = extra_instruction
+
+    markdown = generate_notes(video.subtitle_text, **note_options)
+    output_path = save_single_part_notes(
+        markdown,
+        output_root=output_root,
+        bvid=collection.bvid,
+    )
+    emit(f"学习笔记已保存：{output_path.name}")
+    return SinglePartReport(video=video, output_path=output_path)
+
+
 def process_multi_part_video(
     collection: VideoCollection,
     *,
     output_root: Path,
     selected_parts: tuple[VideoPart, ...] | None = None,
     note_mode: str | None = None,
+    extra_instruction: str | None = None,
     cookies_from_browser: str | None = None,
     on_event: Callable[[str], None] | None = None,
     subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
@@ -110,8 +183,8 @@ def process_multi_part_video(
 
     任何单个分 P 的字幕、模型或文件错误都会被记录，
     不会中断后续分 P。``selected_parts`` 为 ``None`` 时保持原有行为，
-    处理 ``collection`` 中的全部分 P。``note_mode`` 只传给分 P
-    笔记生成，不改变课程合集总结逻辑。
+    处理 ``collection`` 中的全部分 P。``note_mode`` 和
+    ``extra_instruction`` 只传给分 P 笔记生成，不改变课程合集总结逻辑。
     """
 
     fetch_subtitle = subtitle_fetcher or fetch_video_subtitle
@@ -148,6 +221,8 @@ def process_multi_part_video(
             }
             if note_mode is not None:
                 note_options["mode"] = note_mode
+            if extra_instruction is not None:
+                note_options["extra_instruction"] = extra_instruction
             markdown = generate_notes(video.subtitle_text, **note_options)
             result.output_path = save_part_notes(
                 markdown,
