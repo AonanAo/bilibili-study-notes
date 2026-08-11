@@ -58,6 +58,10 @@ class WebGenerationResult:
     summary_filename: str | None = None
     summary_error: str | None = None
     collection_summary_requested: bool = False
+    segmented_notes_requested: bool = False
+    segmented_markdown: str | None = None
+    segmented_filename: str | None = None
+    segmented_error: str | None = None
 
     @property
     def succeeded_count(self) -> int:
@@ -102,6 +106,21 @@ def select_parts(
     return select_video_parts(video_info.parts, selection)
 
 
+def estimate_deepseek_calls(
+    video_info: VideoCollection,
+    *,
+    selected_parts: tuple[VideoPart, ...] | None = None,
+    generate_collection_summary: bool = False,
+    generate_segmented_notes: bool = False,
+) -> int:
+    """返回提交前应展示的最多 DeepSeek 逻辑调用次数。"""
+
+    if video_info.is_multi_part:
+        parts = selected_parts if selected_parts is not None else video_info.parts
+        return len(parts) + int(generate_collection_summary)
+    return 3 if generate_segmented_notes else 1
+
+
 def _web_error_message(error: str | None) -> str | None:
     """把要求使用 CLI 参数的登录错误转换为网页操作提示。"""
 
@@ -136,6 +155,26 @@ def _read_single_part_report(report: SinglePartReport) -> WebPartResult:
         filename=report.output_path.name,
         transcript=report.video.transcript,
     )
+
+
+def _read_segmented_report(
+    report: SinglePartReport,
+) -> tuple[str | None, str | None, str | None]:
+    """只读取本次报告明确产出的分段文件，绝不探测历史文件。"""
+
+    if not report.segmented_notes_requested:
+        return None, None, None
+    if report.segmented_output_path is None:
+        return None, None, report.segmented_error or "分段笔记未生成。"
+    try:
+        markdown = report.segmented_output_path.read_text(encoding="utf-8")
+    except OSError as error:
+        return (
+            None,
+            report.segmented_output_path.name,
+            f"读取已生成分段笔记失败：{error}",
+        )
+    return markdown, report.segmented_output_path.name, report.segmented_error
 
 
 def _read_multi_part_result(result: PartProcessingResult) -> WebPartResult:
@@ -205,6 +244,7 @@ def generate_notes(
     note_mode: str | None = None,
     extra_instruction: str | None = None,
     generate_collection_summary: bool = False,
+    generate_segmented_notes: bool = False,
     cookies_from_browser: str | None = None,
     output_root: Path = OUTPUT_DIR,
     on_event: Callable[[str], None] | None = None,
@@ -229,7 +269,11 @@ def generate_notes(
 
     part = video_info.parts[0]
     try:
-        report = process_single_part_video(video_info, **common_options)
+        report = process_single_part_video(
+            video_info,
+            generate_segmented_notes=generate_segmented_notes,
+            **common_options,
+        )
     except NoSubtitleError as error:
         return WebGenerationResult(
             is_multi_part=False,
@@ -241,6 +285,7 @@ def generate_notes(
                     error=f"无字幕，无法生成笔记：{error}",
                 ),
             ),
+            segmented_notes_requested=generate_segmented_notes,
         )
     except SubtitleLoginRequiredError as error:
         return WebGenerationResult(
@@ -253,6 +298,7 @@ def generate_notes(
                     error=_web_error_message(str(error)),
                 ),
             ),
+            segmented_notes_requested=generate_segmented_notes,
         )
     except (BilibiliError, LLMError, OSError) as error:
         return WebGenerationResult(
@@ -265,8 +311,16 @@ def generate_notes(
                     error=str(error),
                 ),
             ),
+            segmented_notes_requested=generate_segmented_notes,
         )
+    segmented_markdown, segmented_filename, segmented_error = _read_segmented_report(
+        report
+    )
     return WebGenerationResult(
         is_multi_part=False,
         parts=(_read_single_part_report(report),),
+        segmented_notes_requested=report.segmented_notes_requested,
+        segmented_markdown=segmented_markdown,
+        segmented_filename=segmented_filename,
+        segmented_error=segmented_error,
     )

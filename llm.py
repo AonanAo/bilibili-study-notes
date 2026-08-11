@@ -16,12 +16,25 @@ from openai import (
 
 from prompt import (
     COURSE_SUMMARY_SYSTEM_PROMPT,
+    SEGMENT_CONTENT_SYSTEM_PROMPT,
+    SEGMENT_PLAN_SYSTEM_PROMPT,
     STUDY_NOTES_SYSTEM_PROMPT,
     NoteModeError,
     build_course_summary_prompt,
+    build_segment_content_prompt,
+    build_segment_plan_prompt,
     build_study_notes_prompt,
     get_note_mode,
 )
+from segmentation import (
+    AssignedSegment,
+    SegmentNoteContent,
+    SegmentPlan,
+    SegmentationError,
+    parse_segment_note_contents,
+    parse_segment_plan,
+)
+from transcript import Transcript
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -179,6 +192,59 @@ def _request_markdown(
     raise InvalidLLMResponseError("DeepSeek 没有返回可用结果。")
 
 
+def _request_json(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None = None,
+) -> str:
+    """执行一次要求 JSON 对象的 DeepSeek 请求。"""
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        raise MissingAPIKeyError(
+            "未找到 DEEPSEEK_API_KEY。请先在环境变量中设置 DeepSeek API Key。"
+        )
+
+    selected_model = model or os.environ.get("DEEPSEEK_MODEL", "").strip() or DEFAULT_MODEL
+    client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+    try:
+        response = client.chat.completions.create(
+            model=selected_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=MAX_OUTPUT_TOKENS,
+            stream=False,
+            response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        if not response.choices:
+            raise InvalidLLMResponseError("DeepSeek 没有返回可用的 JSON。")
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            raise InvalidLLMResponseError(
+                "DeepSeek 输出达到长度上限，返回的分段 JSON 不完整。"
+            )
+        raw_content = choice.message.content
+        if not isinstance(raw_content, str) or not raw_content.strip():
+            raise InvalidLLMResponseError("DeepSeek 返回了空的 JSON。")
+        return raw_content
+    except AuthenticationError as error:
+        raise LLMRequestError("身份验证失败，请检查 DEEPSEEK_API_KEY。") from error
+    except RateLimitError as error:
+        raise LLMRequestError(
+            "DeepSeek 请求频率过高或账户额度不足，请稍后重试。"
+        ) from error
+    except (APITimeoutError, APIConnectionError) as error:
+        raise LLMRequestError("无法连接 DeepSeek API，请检查网络后重试。") from error
+    except APIStatusError as error:
+        raise LLMRequestError(f"DeepSeek API 返回错误（HTTP {error.status_code}）。") from error
+    except OpenAIError as error:
+        raise LLMRequestError(f"DeepSeek API 请求失败：{error}") from error
+
+
 def generate_study_notes(
     subtitle_text: str,
     *,
@@ -256,3 +322,73 @@ def generate_course_summary(
         status_lines.append("- 失败：无")
 
     return markdown.rstrip() + "\n\n## 处理状态\n" + "\n".join(status_lines)
+
+
+def generate_segment_plan(
+    transcript: Transcript,
+    *,
+    video_title: str = "",
+    video_description: str = "",
+    model: str | None = None,
+) -> SegmentPlan:
+    """调用 DeepSeek 规划单 P 字幕的语义分段。"""
+
+    if not isinstance(transcript, Transcript) or not transcript.cues:
+        raise LLMError("字幕没有有效时间轴 cue，无法规划语义分段。")
+    raw_response = _request_json(
+        system_prompt=SEGMENT_PLAN_SYSTEM_PROMPT,
+        user_prompt=build_segment_plan_prompt(
+            transcript.to_srt(),
+            video_title=video_title.strip(),
+            video_description=video_description.strip(),
+        ),
+        model=model,
+    )
+    try:
+        return parse_segment_plan(raw_response)
+    except SegmentationError as error:
+        raise InvalidLLMResponseError(f"DeepSeek 返回的分段方案无效：{error}") from error
+
+
+def generate_segment_note_contents(
+    assigned_segments: tuple[AssignedSegment, ...],
+    *,
+    video_title: str = "",
+    video_description: str = "",
+    extra_instruction: str | None = None,
+    model: str | None = None,
+) -> tuple[SegmentNoteContent, ...]:
+    """一次调用读取全部切分字幕并生成各段正文和总结重点。"""
+
+    if not assigned_segments:
+        raise LLMError("没有已分配的字幕分段，无法生成分段笔记。")
+    if extra_instruction is not None and not isinstance(extra_instruction, str):
+        raise LLMError("额外学习要求必须是字符串或 None。")
+
+    segment_sources = [
+        (
+            index,
+            assigned.segment.title,
+            assigned.segment.start_seconds,
+            assigned.segment.end_seconds,
+            assigned.transcript.to_srt(),
+        )
+        for index, assigned in enumerate(assigned_segments, start=1)
+    ]
+    raw_response = _request_json(
+        system_prompt=SEGMENT_CONTENT_SYSTEM_PROMPT,
+        user_prompt=build_segment_content_prompt(
+            segment_sources,
+            video_title=video_title.strip(),
+            video_description=video_description.strip(),
+            extra_instruction=(extra_instruction or "").strip(),
+        ),
+        model=model,
+    )
+    try:
+        return parse_segment_note_contents(
+            raw_response,
+            expected_count=len(assigned_segments),
+        )
+    except SegmentationError as error:
+        raise InvalidLLMResponseError(f"DeepSeek 返回的分段内容无效：{error}") from error

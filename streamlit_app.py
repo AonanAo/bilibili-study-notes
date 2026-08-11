@@ -91,13 +91,31 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
     if not result.is_multi_part:
         part = result.parts[0]
         if part.succeeded:
-            st.success(f"P{part.page_number} {part.title}：生成成功")
+            st.success(f"P{part.page_number} {part.title}：总体笔记生成成功")
             st.markdown(part.markdown)
             _render_download_button(part, key="download_single_part")
         elif part.error_type == "no_subtitle":
             st.warning(f"P{part.page_number} {part.title}：{part.error}")
         else:
             st.error(f"P{part.page_number} {part.title}：生成失败：{part.error}")
+
+        if part.succeeded and result.segmented_notes_requested:
+            st.markdown("#### 分段笔记")
+            if result.segmented_markdown is not None:
+                st.success("语义分段笔记生成成功")
+                st.markdown(result.segmented_markdown)
+                st.download_button(
+                    "下载分段笔记 Markdown",
+                    data=result.segmented_markdown,
+                    file_name=(
+                        result.segmented_filename or "segmented_notes.md"
+                    ),
+                    mime="text/markdown",
+                    key="download_segmented_notes",
+                )
+            else:
+                st.error(result.segmented_error or "分段笔记生成失败。")
+                st.caption("总体笔记已保留，仍可查看和下载。")
         return
 
     st.write(
@@ -165,6 +183,7 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
     with st.form("notes_generation_form"):
         part_selection = None
         generate_collection_summary = False
+        generate_segmented_notes = False
         if video_info.is_multi_part:
             part_selection = st.text_input(
                 "选择分P",
@@ -174,6 +193,12 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
             generate_collection_summary = st.checkbox(
                 "生成额外的合集总结",
                 value=False,
+            )
+        else:
+            generate_segmented_notes = st.checkbox(
+                "生成按内容语义分段的笔记",
+                value=False,
+                help="总体笔记仍会生成；另用一次调用规划分段、一次调用生成全部分段内容。",
             )
 
         note_mode = st.selectbox(
@@ -185,6 +210,24 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
             "额外学习要求（可选）",
             placeholder="例如：请重点解释代码实现和设计原因。",
         )
+
+        estimated_parts = video_info.parts
+        estimate_available = True
+        if video_info.is_multi_part:
+            try:
+                estimated_parts = web_service.select_parts(video_info, part_selection)
+            except web_service.PartSelectionError:
+                estimate_available = False
+        if estimate_available:
+            estimated_calls = web_service.estimate_deepseek_calls(
+                video_info,
+                selected_parts=estimated_parts,
+                generate_collection_summary=generate_collection_summary,
+                generate_segmented_notes=generate_segmented_notes,
+            )
+            st.info(f"预计最多调用 DeepSeek {estimated_calls} 次。")
+        else:
+            st.info("当前分P选择无效，修正后将显示预计调用次数。")
         generate_submitted = st.form_submit_button("生成学习笔记", type="primary")
 
     if generate_submitted:
@@ -203,6 +246,7 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 note_mode=note_mode.key if note_mode is not None else None,
                 extra_instruction=extra_instruction.strip() or None,
                 generate_collection_summary=generate_collection_summary,
+                generate_segmented_notes=generate_segmented_notes,
                 cookies_from_browser=st.session_state.cookies_from_browser,
                 on_event=show_event,
             )

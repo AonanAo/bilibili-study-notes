@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Callable, Literal
 
 from bilibili import (
@@ -15,7 +16,20 @@ from bilibili import (
     VideoSubtitle,
     fetch_video_subtitle,
 )
-from llm import LLMError, generate_course_summary, generate_study_notes
+from llm import (
+    LLMError,
+    generate_course_summary,
+    generate_segment_note_contents,
+    generate_segment_plan,
+    generate_study_notes,
+)
+from segmentation import (
+    SegmentNoteContent,
+    SegmentPlan,
+    SegmentationError,
+    assign_cues_to_segments,
+    render_segmented_notes,
+)
 from transcript import Transcript
 
 
@@ -46,6 +60,9 @@ class SinglePartReport:
 
     video: VideoSubtitle
     output_path: Path
+    segmented_notes_requested: bool = False
+    segmented_output_path: Path | None = None
+    segmented_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +123,36 @@ def save_single_part_notes(
     return output_path
 
 
+def save_segmented_notes(
+    markdown: str,
+    *,
+    output_root: Path,
+    bvid: str,
+) -> Path:
+    """原子保存 ``BV号_segmented_notes.md``，失败时不留下半成品。"""
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_path = output_root / f"{bvid}_segmented_notes.md"
+    temporary_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output_root,
+            prefix=f".{bvid}_segmented_notes_",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(markdown.rstrip() + "\n")
+            temporary_path = Path(temporary_file.name)
+        temporary_path.replace(output_path)
+    except OSError:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+    return output_path
+
+
 def save_course_summary(markdown: str, *, output_dir: Path) -> Path:
     """保存多 P 课程总结。"""
 
@@ -127,10 +174,15 @@ def process_single_part_video(
     output_root: Path,
     note_mode: str | None = None,
     extra_instruction: str | None = None,
+    generate_segmented_notes: bool = False,
     cookies_from_browser: str | None = None,
     on_event: Callable[[str], None] | None = None,
     subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
     notes_generator: Callable[..., str] | None = None,
+    segment_planner: Callable[..., SegmentPlan] | None = None,
+    segment_notes_generator: (
+        Callable[..., tuple[SegmentNoteContent, ...]] | None
+    ) = None,
 ) -> SinglePartReport:
     """处理单 P 视频，供命令行之外的入口复用现有生成能力。
 
@@ -142,6 +194,8 @@ def process_single_part_video(
 
     fetch_subtitle = subtitle_fetcher or fetch_video_subtitle
     generate_notes = notes_generator or generate_study_notes
+    plan_segments = segment_planner or generate_segment_plan
+    generate_segment_contents = segment_notes_generator or generate_segment_note_contents
     emit = on_event or (lambda _message: None)
     part = collection.parts[0]
 
@@ -168,7 +222,54 @@ def process_single_part_video(
         bvid=collection.bvid,
     )
     emit(f"学习笔记已保存：{output_path.name}")
-    return SinglePartReport(video=video, output_path=output_path)
+
+    if not generate_segmented_notes:
+        return SinglePartReport(video=video, output_path=output_path)
+
+    try:
+        emit("正在调用 DeepSeek 规划语义分段……")
+        plan = plan_segments(
+            video.transcript,
+            video_title=video.title,
+            video_description=video.description,
+        )
+        assigned_segments = assign_cues_to_segments(video.transcript, plan)
+
+        emit("正在调用 DeepSeek 生成全部分段笔记……")
+        segment_options = {
+            "video_title": video.title,
+            "video_description": video.description,
+        }
+        if extra_instruction is not None:
+            segment_options["extra_instruction"] = extra_instruction
+        contents = generate_segment_contents(assigned_segments, **segment_options)
+        segmented_markdown = render_segmented_notes(
+            assigned_segments,
+            contents,
+            video_title=video.title,
+        )
+        segmented_output_path = save_segmented_notes(
+            segmented_markdown,
+            output_root=output_root,
+            bvid=collection.bvid,
+        )
+    except (LLMError, SegmentationError, OSError) as error:
+        message = f"分段笔记生成失败，总体笔记已保留：{error}"
+        emit(message)
+        return SinglePartReport(
+            video=video,
+            output_path=output_path,
+            segmented_notes_requested=True,
+            segmented_error=message,
+        )
+
+    emit(f"分段笔记已保存：{segmented_output_path.name}")
+    return SinglePartReport(
+        video=video,
+        output_path=output_path,
+        segmented_notes_requested=True,
+        segmented_output_path=segmented_output_path,
+    )
 
 
 def process_multi_part_video(

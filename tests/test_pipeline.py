@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from bilibili import NoSubtitleError, VideoCollection, VideoPart, VideoSubtitle
 from llm import LLMError
 from pipeline import (
@@ -10,6 +12,7 @@ from pipeline import (
     safe_filename,
     save_part_notes,
 )
+from segmentation import SegmentNoteContent, SegmentPlan, SemanticSegment
 from transcript import Transcript, TranscriptCue
 
 
@@ -96,6 +99,160 @@ def test_single_part_pipeline_passes_web_options_and_keeps_output_name(
     assert report.video.transcript.plain_text == "字幕正文"
     assert report.output_path == tmp_path / "BV1DfrdByE2Hx_study_notes.md"
     assert report.output_path.read_text(encoding="utf-8") == "# 视频主题\n单P笔记\n"
+
+
+def test_single_part_default_keeps_one_model_call_and_no_segment_file(
+    tmp_path: Path,
+) -> None:
+    collection = VideoCollection(
+        bvid="BV1DfrdByE2Hx",
+        title="Python",
+        description="",
+        parts=(VideoPart(1, "Python", "https://example.test/video"),),
+    )
+    calls: list[str] = []
+    video = VideoSubtitle(
+        collection.bvid,
+        "Python",
+        "",
+        _transcript("字幕"),
+    )
+
+    def fake_notes(*_args: object, **_kwargs: object) -> str:
+        calls.append("overall")
+        return "# 视频主题\n总体笔记"
+
+    def unexpected(*_args: object, **_kwargs: object) -> object:
+        calls.append("unexpected")
+        raise AssertionError("默认关闭时不得进入分段流程")
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        subtitle_fetcher=lambda *_args, **_kwargs: video,
+        notes_generator=fake_notes,
+        segment_planner=unexpected,
+        segment_notes_generator=unexpected,
+    )
+
+    assert calls == ["overall"]
+    assert report.segmented_notes_requested is False
+    assert report.segmented_output_path is None
+    assert not (tmp_path / "BV1DfrdByE2Hx_segmented_notes.md").exists()
+
+
+def test_single_part_segmented_flow_uses_three_calls_in_order(
+    tmp_path: Path,
+) -> None:
+    collection = VideoCollection(
+        bvid="BV1DfrdByE2Hx",
+        title="Python",
+        description="",
+        parts=(VideoPart(1, "Python", "https://example.test/video"),),
+    )
+    transcript = Transcript(
+        "bilibili",
+        "zh-CN",
+        (
+            TranscriptCue(0.0, 5.0, "变量字幕"),
+            TranscriptCue(5.0, 10.0, "函数字幕"),
+        ),
+    )
+    video = VideoSubtitle(collection.bvid, "Python", "简介", transcript)
+    calls: list[str] = []
+
+    def fake_notes(*_args: object, **_kwargs: object) -> str:
+        calls.append("overall")
+        return "# 视频主题\n总体笔记"
+
+    def fake_plan(received: Transcript, **kwargs: object) -> SegmentPlan:
+        calls.append("plan")
+        assert received is transcript
+        assert kwargs["video_title"] == "Python"
+        return SegmentPlan(
+            (
+                SemanticSegment("变量", 0.0, 5.0),
+                SemanticSegment("函数", 5.0, 10.0),
+            )
+        )
+
+    def fake_segment_contents(assigned, **kwargs: object):
+        calls.append("contents")
+        assert [item.transcript.plain_text for item in assigned] == [
+            "变量字幕",
+            "函数字幕",
+        ]
+        assert kwargs["extra_instruction"] == "关注代码"
+        return (
+            SegmentNoteContent("变量正文", ("变量重点",)),
+            SegmentNoteContent("函数正文", ("函数重点",)),
+        )
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        extra_instruction="关注代码",
+        generate_segmented_notes=True,
+        subtitle_fetcher=lambda *_args, **_kwargs: video,
+        notes_generator=fake_notes,
+        segment_planner=fake_plan,
+        segment_notes_generator=fake_segment_contents,
+    )
+
+    assert calls == ["overall", "plan", "contents"]
+    assert report.output_path.exists()
+    assert report.segmented_notes_requested is True
+    assert report.segmented_error is None
+    assert report.segmented_output_path == (
+        tmp_path / "BV1DfrdByE2Hx_segmented_notes.md"
+    )
+    segmented = report.segmented_output_path.read_text(encoding="utf-8")
+    assert "## 1. 变量" in segmented
+    assert "## 2. 函数" in segmented
+    assert segmented.count("### 总结重点") == 2
+
+
+@pytest.mark.parametrize("failure_stage", ["plan", "contents"])
+def test_segment_failure_preserves_overall_and_writes_no_pseudo_complete_file(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    collection = VideoCollection(
+        bvid="BV1DfrdByE2Hx",
+        title="Python",
+        description="",
+        parts=(VideoPart(1, "Python", "https://example.test/video"),),
+    )
+    transcript = _transcript("字幕")
+    video = VideoSubtitle(collection.bvid, "Python", "", transcript)
+
+    def fake_plan(*_args: object, **_kwargs: object) -> SegmentPlan:
+        if failure_stage == "plan":
+            raise LLMError("规划失败")
+        return SegmentPlan((SemanticSegment("一段", 0.0, 1.0),))
+
+    def fake_contents(*_args: object, **_kwargs: object):
+        if failure_stage == "contents":
+            raise LLMError("内容失败")
+        raise AssertionError("规划失败后不应调用内容生成")
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        generate_segmented_notes=True,
+        subtitle_fetcher=lambda *_args, **_kwargs: video,
+        notes_generator=lambda *_args, **_kwargs: "# 视频主题\n总体笔记",
+        segment_planner=fake_plan,
+        segment_notes_generator=fake_contents,
+    )
+
+    assert report.output_path.read_text(encoding="utf-8").endswith("总体笔记\n")
+    assert report.segmented_notes_requested is True
+    expected_error = "规划失败" if failure_stage == "plan" else "内容失败"
+    assert expected_error in report.segmented_error
+    assert report.segmented_output_path is None
+    assert not (tmp_path / "BV1DfrdByE2Hx_segmented_notes.md").exists()
+    assert not list(tmp_path.glob(".*_segmented_notes_*.tmp"))
 
 
 def test_multi_part_processing_skips_failures_and_creates_summary(

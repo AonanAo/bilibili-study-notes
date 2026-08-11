@@ -6,6 +6,8 @@ import pytest
 
 import llm
 from prompt import build_course_summary_prompt, build_study_notes_prompt
+from segmentation import AssignedSegment, SegmentPlan, SemanticSegment
+from transcript import Transcript, TranscriptCue
 
 
 VALID_NOTES = """# 视频主题
@@ -158,6 +160,97 @@ def test_generate_notes_calls_deepseek_and_returns_markdown(
     assert call["stream"] is False
     assert call["extra_body"] == {"thinking": {"type": "disabled"}}
     assert "Python 变量字幕" in call["messages"][1]["content"]
+
+
+def test_generate_segment_plan_calls_deepseek_with_strict_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = (
+        '{"segments":[{"title":"变量","start_seconds":0,'
+        '"end_seconds":2}]}'
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+    transcript = Transcript(
+        source="bilibili",
+        language="zh-CN",
+        cues=(TranscriptCue(0.0, 2.0, "变量字幕"),),
+    )
+
+    plan = llm.generate_segment_plan(transcript, video_title="Python")
+
+    assert isinstance(plan, SegmentPlan)
+    assert plan.segments[0].title == "变量"
+    call = FakeOpenAI.instances[0].chat.completions.calls[0]
+    assert call["response_format"] == {"type": "json_object"}
+    assert "00:00:00,000 --> 00:00:02,000" in call["messages"][1]["content"]
+    assert "固定分钟" in call["messages"][1]["content"]
+
+
+def test_generate_all_segment_contents_in_one_json_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = """{
+      "segments": [
+        {"segment_number": 1, "body_markdown": "变量正文", "summary_points": ["变量重点"]},
+        {"segment_number": 2, "body_markdown": "函数正文", "summary_points": ["函数重点"]}
+      ]
+    }"""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+    assigned = (
+        AssignedSegment(
+            SemanticSegment("变量", 0.0, 1.0),
+            Transcript(
+                "bilibili",
+                "zh-CN",
+                (TranscriptCue(0.0, 1.0, "变量字幕"),),
+            ),
+        ),
+        AssignedSegment(
+            SemanticSegment("函数", 1.0, 2.0),
+            Transcript(
+                "bilibili",
+                "zh-CN",
+                (TranscriptCue(1.0, 2.0, "函数字幕"),),
+            ),
+        ),
+    )
+
+    contents = llm.generate_segment_note_contents(
+        assigned,
+        extra_instruction="关注代码",
+    )
+
+    assert [content.summary_points for content in contents] == [
+        ("变量重点",),
+        ("函数重点",),
+    ]
+    assert len(FakeOpenAI.instances) == 1
+    calls = FakeOpenAI.instances[0].chat.completions.calls
+    assert len(calls) == 1
+    assert "变量字幕" in calls[0]["messages"][1]["content"]
+    assert "函数字幕" in calls[0]["messages"][1]["content"]
+    assert "关注代码" in calls[0]["messages"][1]["content"]
+
+
+def test_generate_segment_plan_rejects_invalid_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = "not-json"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+    transcript = Transcript(
+        "bilibili",
+        "zh-CN",
+        (TranscriptCue(0.0, 1.0, "字幕"),),
+    )
+
+    with pytest.raises(llm.InvalidLLMResponseError, match="分段方案无效"):
+        llm.generate_segment_plan(transcript)
 
 
 def test_generate_notes_allows_model_from_environment(

@@ -165,6 +165,29 @@ def test_note_mode_options_reuse_prompt_registry() -> None:
     assert [mode.key for mode in modes] == ["technical", "course"]
 
 
+def test_estimated_call_count_for_single_and_multi_part() -> None:
+    single = _collection(part_count=1)
+    multi = _collection(part_count=3)
+
+    assert web_service.estimate_deepseek_calls(single) == 1
+    assert (
+        web_service.estimate_deepseek_calls(
+            single,
+            generate_segmented_notes=True,
+        )
+        == 3
+    )
+    assert (
+        web_service.estimate_deepseek_calls(
+            multi,
+            selected_parts=(multi.parts[1],),
+            generate_collection_summary=True,
+            generate_segmented_notes=True,
+        )
+        == 2
+    )
+
+
 def test_generate_notes_dispatches_single_part_to_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -214,6 +237,92 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
     assert result.parts[0].markdown == "# 视频主题\n单P笔记\n"
     assert result.parts[0].filename == output_path.name
     assert result.parts[0].transcript is video.transcript
+
+
+def test_generate_notes_passes_segment_switch_and_reads_only_reported_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+    overall_path = tmp_path / "BV1DfrdByE2Hx_study_notes.md"
+    segmented_path = tmp_path / "BV1DfrdByE2Hx_segmented_notes.md"
+    overall_path.write_text("# 总体笔记\n", encoding="utf-8")
+    segmented_path.write_text("# 本次分段笔记\n", encoding="utf-8")
+    video = VideoSubtitle(
+        collection.bvid,
+        "Python",
+        "",
+        _transcript("字幕"),
+    )
+    received: dict[str, object] = {}
+
+    def fake_process(video_info, **kwargs):
+        received["video_info"] = video_info
+        received.update(kwargs)
+        return SinglePartReport(
+            video,
+            overall_path,
+            segmented_notes_requested=True,
+            segmented_output_path=segmented_path,
+        )
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_process)
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        generate_segmented_notes=True,
+        output_root=tmp_path,
+    )
+
+    assert received["generate_segmented_notes"] is True
+    assert result.segmented_notes_requested is True
+    assert result.segmented_markdown == "# 本次分段笔记\n"
+    assert result.segmented_filename == segmented_path.name
+    assert result.segmented_error is None
+
+
+def test_historical_segmented_file_is_not_read_after_current_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+    overall_path = tmp_path / "BV1DfrdByE2Hx_study_notes.md"
+    historical_path = tmp_path / "BV1DfrdByE2Hx_segmented_notes.md"
+    overall_path.write_text("# 总体笔记\n", encoding="utf-8")
+    historical_path.write_text("# 历史分段笔记\n", encoding="utf-8")
+    video = VideoSubtitle(collection.bvid, "Python", "", _transcript("字幕"))
+    read_paths: list[Path] = []
+    original_read_text = Path.read_text
+
+    def tracking_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        read_paths.append(path)
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+    monkeypatch.setattr(
+        web_service,
+        "process_single_part_video",
+        lambda *_args, **_kwargs: SinglePartReport(
+            video,
+            overall_path,
+            segmented_notes_requested=True,
+            segmented_error="本次规划失败",
+        ),
+    )
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        generate_segmented_notes=True,
+        output_root=tmp_path,
+    )
+
+    assert result.parts[0].markdown == "# 总体笔记\n"
+    assert result.segmented_markdown is None
+    assert result.segmented_error == "本次规划失败"
+    assert overall_path in read_paths
+    assert historical_path not in read_paths
 
 
 def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
@@ -280,6 +389,37 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
     assert result.summary_markdown == "# 视频整体主题\n合集总结\n"
     assert result.summary_filename == "summary.md"
     assert result.collection_summary_requested is True
+
+
+def test_multi_part_never_receives_segmented_notes_switch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=2)
+    received: dict[str, object] = {}
+
+    def fake_process(video_info, **kwargs):
+        received["video_info"] = video_info
+        received.update(kwargs)
+        return MultiPartReport(
+            output_dir=tmp_path / collection.bvid,
+            parts=(),
+            summary_path=None,
+            collection_summary_requested=False,
+        )
+
+    monkeypatch.setattr(web_service, "process_multi_part_video", fake_process)
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        generate_segmented_notes=True,
+        output_root=tmp_path,
+    )
+
+    assert "generate_segmented_notes" not in received
+    assert result.is_multi_part is True
+    assert result.segmented_notes_requested is False
 
 
 def test_generate_notes_skips_historical_summary_when_not_requested(
