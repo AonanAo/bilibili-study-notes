@@ -121,6 +121,8 @@ def test_segment_plan_prompt_uses_full_srt_and_semantic_boundaries() -> None:
         "1\n00:00:00,000 --> 00:00:01,000\n字幕\n",
         video_title="Python",
         video_description="简介",
+        transcript_start_seconds=0.0,
+        transcript_end_seconds=1686.44,
     )
 
     assert "按内容" in prompt or "语义" in prompt
@@ -128,6 +130,8 @@ def test_segment_plan_prompt_uses_full_srt_and_semantic_boundaries() -> None:
     assert '"start_seconds"' in prompt
     assert "00:00:00,000 --> 00:00:01,000" in prompt
     assert "Python" in prompt
+    assert "0.000–1686.440 秒" in prompt
+    assert "最后一段 end_seconds 必须等于 1686.440" in prompt
 
 
 def test_segment_content_prompt_contains_every_cut_subtitle_once() -> None:

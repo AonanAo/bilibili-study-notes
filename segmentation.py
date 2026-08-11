@@ -267,6 +267,16 @@ def assign_cues_to_segments(
     omitted = [transcript.cues[position] for position in outside_positions]
     if omitted:
         omitted_durations = [cue.end_seconds - cue.start_seconds for cue in omitted]
+        leading_seconds = sum(
+            cue.end_seconds - cue.start_seconds
+            for cue in omitted
+            if cue.end_seconds <= plan.segments[0].start_seconds
+        )
+        trailing_seconds = sum(
+            cue.end_seconds - cue.start_seconds
+            for cue in omitted
+            if cue.start_seconds >= plan.segments[-1].end_seconds
+        )
         if (
             max(omitted_durations) > MAX_OMITTED_CUE_SECONDS
             or sum(omitted_durations) > MAX_TOTAL_OMITTED_SECONDS
@@ -274,7 +284,8 @@ def assign_cues_to_segments(
             raise SegmentationError(
                 "分段方案遗漏了超出容差的有效字幕："
                 f"最长 {max(omitted_durations):.3f} 秒，"
-                f"累计 {sum(omitted_durations):.3f} 秒；"
+                f"累计 {sum(omitted_durations):.3f} 秒"
+                f"（开头 {leading_seconds:.3f} 秒，结尾 {trailing_seconds:.3f} 秒）；"
                 f"允许每条不超过 {MAX_OMITTED_CUE_SECONDS:.1f} 秒且"
                 f"累计不超过 {MAX_TOTAL_OMITTED_SECONDS:.1f} 秒。"
             )

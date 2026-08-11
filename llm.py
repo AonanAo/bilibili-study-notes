@@ -341,6 +341,8 @@ def generate_segment_plan(
             transcript.to_srt(),
             video_title=video_title.strip(),
             video_description=video_description.strip(),
+            transcript_start_seconds=transcript.cues[0].start_seconds,
+            transcript_end_seconds=max(cue.end_seconds for cue in transcript.cues),
         ),
         model=model,
     )

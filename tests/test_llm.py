@@ -186,6 +186,7 @@ def test_generate_segment_plan_calls_deepseek_with_strict_json(
     assert call["response_format"] == {"type": "json_object"}
     assert "00:00:00,000 --> 00:00:02,000" in call["messages"][1]["content"]
     assert "固定分钟" in call["messages"][1]["content"]
+    assert "最后一段 end_seconds 必须等于 2.000" in call["messages"][1]["content"]
 
 
 def test_generate_all_segment_contents_in_one_json_call(

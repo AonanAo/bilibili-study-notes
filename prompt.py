@@ -316,8 +316,22 @@ def build_segment_plan_prompt(
     *,
     video_title: str = "",
     video_description: str = "",
+    transcript_start_seconds: float | None = None,
+    transcript_end_seconds: float | None = None,
 ) -> str:
     """组装语义分段规划的严格 JSON 提示词。"""
+
+    coverage_text = ""
+    if transcript_start_seconds is not None and transcript_end_seconds is not None:
+        coverage_text = f"""
+
+【必须完整覆盖的字幕时间范围】
+{transcript_start_seconds:.3f}–{transcript_end_seconds:.3f} 秒
+
+- 第一段 start_seconds 必须等于 {transcript_start_seconds:.3f}。
+- 最后一段 end_seconds 必须等于 {transcript_end_seconds:.3f}。
+- 不得在最后一条字幕之前把某一段误判为“视频结尾”。
+"""
 
     return f"""
 请根据完整字幕规划语义分段。分段数量由内容决定，不要使用固定分钟长度。
@@ -340,6 +354,7 @@ def build_segment_plan_prompt(
 - 每段必须包含有效字幕内容，标题要准确概括该段语义。
 - 相邻分段尽量首尾衔接，不要用空白时间范围跳过话题过渡内容。
 - 让所有有效字幕 cue 与至少一个分段范围相交；只允许整条字幕轨最前或最后的极短异常 cue 位于范围外。
+{coverage_text}
 
 【视频标题】
 {video_title or '（未提供）'}
