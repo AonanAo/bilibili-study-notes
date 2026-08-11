@@ -134,6 +134,7 @@ def test_multi_part_processing_skips_failures_and_creates_summary(
     assert report.parts[0].error_type is None
     assert report.parts[1].error_type == "no_subtitle"
     assert report.parts[2].error_type == "processing_failed"
+    assert report.collection_summary_requested is True
     assert report.summary_path == tmp_path / "BV1DfrdByE2Hx" / "summary.md"
     assert report.summary_path.exists()
     assert (tmp_path / "BV1DfrdByE2Hx" / "P01_第一章.md").exists()
@@ -287,3 +288,53 @@ def test_pipeline_defaults_to_processing_all_parts(tmp_path: Path) -> None:
     assert all(result.error_type is None for result in report.parts)
     assert all("mode" not in kwargs for kwargs in note_kwargs)
     assert all("extra_instruction" not in kwargs for kwargs in note_kwargs)
+
+
+def test_pipeline_skips_unrequested_collection_summary_and_keeps_part_notes(
+    tmp_path: Path,
+) -> None:
+    collection = _collection()
+    output_dir = tmp_path / collection.bvid
+    output_dir.mkdir()
+    historical_summary = output_dir / "summary.md"
+    historical_summary.write_text("# 历史合集总结\n", encoding="utf-8")
+    events: list[str] = []
+    summary_calls: list[object] = []
+
+    def fake_fetch(url: str, **_kwargs: object) -> VideoSubtitle:
+        page_number = int(url.rsplit("=", 1)[1])
+        return VideoSubtitle(
+            bvid=collection.bvid,
+            title=f"第 {page_number} 章",
+            description="",
+            subtitle_language="zh-CN",
+            subtitle_text=f"P{page_number} 字幕",
+        )
+
+    def fake_summary(*args: object, **_kwargs: object) -> str:
+        summary_calls.extend(args)
+        return "# 不应生成的合集总结"
+
+    report = process_multi_part_video(
+        collection,
+        output_root=tmp_path,
+        generate_collection_summary=False,
+        on_event=events.append,
+        subtitle_fetcher=fake_fetch,
+        notes_generator=lambda subtitle_text, **_kwargs: f"# 视频主题\n{subtitle_text}",
+        summary_generator=fake_summary,
+    )
+
+    assert report.collection_summary_requested is False
+    assert report.summary_path is None
+    assert report.summary_error is None
+    assert report.succeeded_count == 3
+    assert all(result.error_type is None for result in report.parts)
+    assert sorted(path.name for path in output_dir.glob("P*.md")) == [
+        "P01_第_1_章.md",
+        "P02_第_2_章.md",
+        "P03_第_3_章.md",
+    ]
+    assert summary_calls == []
+    assert historical_summary.read_text(encoding="utf-8") == "# 历史合集总结\n"
+    assert "本次已按设置跳过合集总结" in events

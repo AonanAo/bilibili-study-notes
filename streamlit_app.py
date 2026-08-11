@@ -1,4 +1,4 @@
-"""v0.2.3 Streamlit 入口：生成、展示并下载学习笔记。"""
+"""Streamlit 入口：生成、展示并下载学习笔记。"""
 
 from __future__ import annotations
 
@@ -138,7 +138,9 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
         st.error(f"P{part.page_number} {part.title}：{part.error}")
 
     st.markdown("#### 合集总结")
-    if result.summary_markdown is not None:
+    if not result.collection_summary_requested:
+        st.info("本次已按设置跳过合集总结")
+    elif result.summary_markdown is not None:
         st.success("summary.md 生成成功")
         st.markdown(result.summary_markdown)
         st.download_button(
@@ -162,11 +164,16 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
     st.markdown("### 生成学习笔记")
     with st.form("notes_generation_form"):
         part_selection = None
+        generate_collection_summary = False
         if video_info.is_multi_part:
             part_selection = st.text_input(
                 "选择分P",
                 placeholder="例如：1；1,3,5；或 1,3,5-8；留空处理全部",
                 help="选择规则与命令行 --parts 完全一致。",
+            )
+            generate_collection_summary = st.checkbox(
+                "生成额外的合集总结",
+                value=False,
             )
 
         note_mode = st.selectbox(
@@ -195,6 +202,7 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 selected_parts=selected_parts,
                 note_mode=note_mode.key if note_mode is not None else None,
                 extra_instruction=extra_instruction.strip() or None,
+                generate_collection_summary=generate_collection_summary,
                 cookies_from_browser=st.session_state.cookies_from_browser,
                 on_event=show_event,
             )

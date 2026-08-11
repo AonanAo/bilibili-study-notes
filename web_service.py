@@ -55,6 +55,7 @@ class WebGenerationResult:
     summary_markdown: str | None = None
     summary_filename: str | None = None
     summary_error: str | None = None
+    collection_summary_requested: bool = False
 
     @property
     def succeeded_count(self) -> int:
@@ -169,9 +170,11 @@ def _read_multi_part_report(report: MultiPartReport) -> WebGenerationResult:
     parts = tuple(_read_multi_part_result(result) for result in report.parts)
     summary_markdown = None
     summary_filename = None
-    summary_error = report.summary_error
+    summary_error = (
+        report.summary_error if report.collection_summary_requested else None
+    )
 
-    if report.summary_path is not None:
+    if report.collection_summary_requested and report.summary_path is not None:
         summary_filename = report.summary_path.name
         try:
             summary_markdown = report.summary_path.read_text(encoding="utf-8")
@@ -184,6 +187,7 @@ def _read_multi_part_report(report: MultiPartReport) -> WebGenerationResult:
         summary_markdown=summary_markdown,
         summary_filename=summary_filename,
         summary_error=summary_error,
+        collection_summary_requested=report.collection_summary_requested,
     )
 
 
@@ -193,6 +197,7 @@ def generate_notes(
     selected_parts: tuple[VideoPart, ...],
     note_mode: str | None = None,
     extra_instruction: str | None = None,
+    generate_collection_summary: bool = False,
     cookies_from_browser: str | None = None,
     output_root: Path = OUTPUT_DIR,
     on_event: Callable[[str], None] | None = None,
@@ -210,6 +215,7 @@ def generate_notes(
         report = process_multi_part_video(
             video_info,
             selected_parts=selected_parts,
+            generate_collection_summary=generate_collection_summary,
             **common_options,
         )
         return _read_multi_part_report(report)

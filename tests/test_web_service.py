@@ -246,6 +246,7 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
         selected_parts=selected_parts,
         note_mode="course",
         extra_instruction="关注关键观点。",
+        generate_collection_summary=True,
         cookies_from_browser="firefox",
         output_root=tmp_path,
         on_event=on_event,
@@ -256,6 +257,7 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
     assert received["output_root"] == tmp_path
     assert received["note_mode"] == "course"
     assert received["extra_instruction"] == "关注关键观点。"
+    assert received["generate_collection_summary"] is True
     assert received["cookies_from_browser"] == "firefox"
     assert received["on_event"] is on_event
     assert events == ["多P事件"]
@@ -265,6 +267,56 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
     assert result.parts[0].filename == part_path.name
     assert result.summary_markdown == "# 视频整体主题\n合集总结\n"
     assert result.summary_filename == "summary.md"
+    assert result.collection_summary_requested is True
+
+
+def test_generate_notes_skips_historical_summary_when_not_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=2)
+    output_dir = tmp_path / collection.bvid
+    output_dir.mkdir()
+    part_path = output_dir / "P01_第一章.md"
+    part_path.write_text("# 视频主题\n第一章\n", encoding="utf-8")
+    historical_summary = output_dir / "summary.md"
+    historical_summary.write_text("# 历史合集总结\n", encoding="utf-8")
+    received: dict[str, object] = {}
+    read_paths: list[Path] = []
+    original_read_text = Path.read_text
+
+    def tracking_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        read_paths.append(path)
+        return original_read_text(path, *args, **kwargs)
+
+    def fake_process(video_info, **kwargs):
+        received["video_info"] = video_info
+        received.update(kwargs)
+        return MultiPartReport(
+            output_dir=output_dir,
+            parts=(PartProcessingResult(1, "第一章", output_path=part_path),),
+            summary_path=historical_summary,
+            collection_summary_requested=False,
+            summary_error="不应展示的历史错误",
+        )
+
+    monkeypatch.setattr(Path, "read_text", tracking_read_text)
+    monkeypatch.setattr(web_service, "process_multi_part_video", fake_process)
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        output_root=tmp_path,
+    )
+
+    assert received["generate_collection_summary"] is False
+    assert result.collection_summary_requested is False
+    assert result.parts[0].markdown == "# 视频主题\n第一章\n"
+    assert result.summary_markdown is None
+    assert result.summary_filename is None
+    assert result.summary_error is None
+    assert part_path in read_paths
+    assert historical_summary not in read_paths
 
 
 def test_generate_notes_converts_single_part_no_subtitle(
@@ -382,6 +434,7 @@ def test_generate_notes_converts_multi_part_statuses_and_summary_failure(
     result = web_service.generate_notes(
         collection,
         selected_parts=collection.parts,
+        generate_collection_summary=True,
         output_root=tmp_path,
     )
 
@@ -393,6 +446,7 @@ def test_generate_notes_converts_multi_part_statuses_and_summary_failure(
     assert result.parts[2].error_type == "processing_failed"
     assert result.summary_markdown is None
     assert result.summary_error == "课程总结生成失败"
+    assert result.collection_summary_requested is True
 
 
 def test_generate_notes_converts_multi_part_login_failure_to_web_instruction(

@@ -53,6 +53,7 @@ class MultiPartReport:
     output_dir: Path
     parts: tuple[PartProcessingResult, ...]
     summary_path: Path | None
+    collection_summary_requested: bool = True
     summary_error: str | None = None
 
     @property
@@ -175,6 +176,7 @@ def process_multi_part_video(
     selected_parts: tuple[VideoPart, ...] | None = None,
     note_mode: str | None = None,
     extra_instruction: str | None = None,
+    generate_collection_summary: bool = True,
     cookies_from_browser: str | None = None,
     on_event: Callable[[str], None] | None = None,
     subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
@@ -187,6 +189,7 @@ def process_multi_part_video(
     不会中断后续分 P。``selected_parts`` 为 ``None`` 时保持原有行为，
     处理 ``collection`` 中的全部分 P。``note_mode`` 和
     ``extra_instruction`` 只传给分 P 笔记生成，不改变课程合集总结逻辑。
+    ``generate_collection_summary`` 默认为 ``True``，以保持命令行原有行为。
     """
 
     fetch_subtitle = subtitle_fetcher or fetch_video_subtitle
@@ -245,6 +248,15 @@ def process_multi_part_video(
             emit(f"[P{part.page_number:02d}] 处理失败，已继续：{error}")
 
         results.append(result)
+
+    if not generate_collection_summary:
+        emit("本次已按设置跳过合集总结")
+        return MultiPartReport(
+            output_dir=output_dir,
+            parts=tuple(results),
+            summary_path=None,
+            collection_summary_requested=False,
+        )
 
     # 按要求从已写入磁盘的 Markdown 文件重新读取内容，
     # 再交给 DeepSeek 做课程级总结。
