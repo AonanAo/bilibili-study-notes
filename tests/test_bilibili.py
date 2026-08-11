@@ -94,6 +94,11 @@ def test_fetch_returns_title_description_and_chinese_subtitle(monkeypatch: pytes
     assert result.description == "这是视频简介。"
     assert result.subtitle_language == "zh-CN"
     assert result.subtitle_text == "你好"
+    assert result.transcript.source == "bilibili"
+    assert len(result.transcript.cues) == 1
+    assert result.transcript.cues[0].start_seconds == 0.0
+    assert result.transcript.cues[0].end_seconds == 1.0
+    assert result.transcript.cues[0].text == "你好"
 
 
 def test_direct_bvid_is_converted_to_standard_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -236,6 +241,46 @@ def test_fetch_reports_no_subtitle(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bilibili, "YoutubeDL", FakeYoutubeDL)
 
     with pytest.raises(bilibili.NoSubtitleError, match="没有可用"):
+        bilibili.fetch_video_subtitle("https://www.bilibili.com/video/BV1jJ411r7eH")
+
+
+def test_fetch_reports_empty_subtitle_track(monkeypatch: pytest.MonkeyPatch) -> None:
+    FakeYoutubeDL.warning = None
+    FakeYoutubeDL.info = {
+        "title": "空字幕视频",
+        "description": "",
+        "subtitles": {
+            "zh-CN": [{"ext": "srt", "data": "1\n00:00:00,000 --> 00:00:01,000\n"}]
+        },
+    }
+    monkeypatch.setattr(bilibili, "YoutubeDL", FakeYoutubeDL)
+
+    with pytest.raises(bilibili.NoSubtitleError, match="字幕轨道为空"):
+        bilibili.fetch_video_subtitle("https://www.bilibili.com/video/BV1jJ411r7eH")
+
+
+def test_fetch_reports_malformed_subtitle_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeYoutubeDL.warning = None
+    FakeYoutubeDL.info = {
+        "title": "异常字幕视频",
+        "description": "",
+        "subtitles": {
+            "zh-CN": [
+                {
+                    "ext": "srt",
+                    "data": "1\n00:00:02,000 --> 00:00:02,000\n字幕\n",
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(bilibili, "YoutubeDL", FakeYoutubeDL)
+
+    with pytest.raises(
+        bilibili.BilibiliFetchError,
+        match="字幕结束时间必须晚于开始时间",
+    ):
         bilibili.fetch_video_subtitle("https://www.bilibili.com/video/BV1jJ411r7eH")
 
 

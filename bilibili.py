@@ -1,6 +1,6 @@
 """B 站视频字幕获取模块。
 
-这个模块只负责一件事：把 B 站视频的字幕变成纯文本。
+这个模块只负责一件事：获取 B 站视频信息和带时间轴的字幕。
 站点解析和接口适配交给成熟的开源项目 yt-dlp 完成。
 """
 
@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, urlparse
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import YoutubeDLError
+
+from transcript import Transcript, TranscriptParseError, parse_srt
 
 
 # 旧版 BV 号是“BV”加 10 位字符；新版 BV 号（例如
@@ -56,8 +58,19 @@ class VideoSubtitle:
     bvid: str
     title: str
     description: str
-    subtitle_language: str
-    subtitle_text: str
+    transcript: Transcript
+
+    @property
+    def subtitle_language(self) -> str:
+        """兼容旧调用：返回字幕语言。"""
+
+        return self.transcript.language
+
+    @property
+    def subtitle_text(self) -> str:
+        """兼容旧调用：返回不含时间轴的字幕纯文本。"""
+
+        return self.transcript.plain_text
 
 
 @dataclass(frozen=True)
@@ -292,28 +305,13 @@ def get_video_parts(
 
 
 def _srt_to_plain_text(srt_text: str) -> str:
-    """去掉 SRT 序号和时间轴，每个字幕片段保留为一行。"""
+    """兼容旧调用：解析 SRT 后返回纯文本。"""
 
-    cue_texts: list[str] = []
-    # SRT 使用空行分隔字幕块，同时兼容 Windows 换行符。
-    blocks = re.split(r"\r?\n\s*\r?\n", srt_text.strip().lstrip("\ufeff"))
-
-    for block in blocks:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if not lines:
-            continue
-
-        # 标准 SRT 的第一行是序号，第二行是时间轴。
-        if lines and lines[0].isdigit():
-            lines.pop(0)
-        if lines and "-->" in lines[0]:
-            lines.pop(0)
-
-        # 同一个字幕块可能分成多行；合并后阅读更自然。
-        if lines:
-            cue_texts.append(" ".join(lines))
-
-    return "\n".join(cue_texts).strip()
+    return parse_srt(
+        srt_text,
+        source="bilibili",
+        language="und",
+    ).plain_text
 
 
 def _select_subtitle_track(subtitles: dict) -> tuple[str, dict] | None:
@@ -347,7 +345,7 @@ def fetch_video_subtitle(
     *,
     cookies_from_browser: str | None = None,
 ) -> VideoSubtitle:
-    """获取视频标题、简介和字幕纯文本。
+    """获取视频标题、简介和带时间轴的结构化字幕。
 
     Args:
         video_url: 标准 B 站视频链接或直接 BV 号。
@@ -421,8 +419,16 @@ def fetch_video_subtitle(
             "请先升级 yt-dlp 后重试。"
         )
 
-    subtitle_text = _srt_to_plain_text(srt_text)
-    if not subtitle_text:
+    try:
+        transcript = parse_srt(
+            srt_text,
+            source="bilibili",
+            language=language,
+        )
+    except TranscriptParseError as error:
+        raise BilibiliFetchError(f"字幕格式解析失败：{error}") from error
+
+    if not transcript.cues:
         raise NoSubtitleError(
             "该视频的字幕轨道为空。",
             video_title=video_title,
@@ -432,6 +438,5 @@ def fetch_video_subtitle(
         bvid=bvid,
         title=video_title,
         description=(info.get("description") or "").strip(),
-        subtitle_language=language,
-        subtitle_text=subtitle_text,
+        transcript=transcript,
     )

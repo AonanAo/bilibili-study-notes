@@ -15,6 +15,7 @@ from bilibili import (
 )
 from llm import LLMError
 from pipeline import MultiPartReport, PartProcessingResult, SinglePartReport
+from transcript import Transcript, TranscriptCue
 
 
 def _collection(*, part_count: int) -> VideoCollection:
@@ -30,6 +31,14 @@ def _collection(*, part_count: int) -> VideoCollection:
             )
             for number in range(1, part_count + 1)
         ),
+    )
+
+
+def _transcript(text: str) -> Transcript:
+    return Transcript(
+        source="bilibili",
+        language="zh-CN",
+        cues=(TranscriptCue(0.0, 1.0, text),),
     )
 
 
@@ -170,8 +179,7 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
         bvid=collection.bvid,
         title="真实视频标题",
         description="真实简介",
-        subtitle_language="zh-CN",
-        subtitle_text="字幕",
+        transcript=_transcript("字幕"),
     )
 
     def fake_process(video_info, **kwargs):
@@ -205,6 +213,7 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
     assert result.parts[0].title == "真实视频标题"
     assert result.parts[0].markdown == "# 视频主题\n单P笔记\n"
     assert result.parts[0].filename == output_path.name
+    assert result.parts[0].transcript is video.transcript
 
 
 def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
@@ -222,6 +231,7 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
     part_path.write_text("# 视频主题\n第二章\n", encoding="utf-8")
     summary_path = output_dir / "summary.md"
     summary_path.write_text("# 视频整体主题\n合集总结\n", encoding="utf-8")
+    transcript = _transcript("第二章字幕")
 
     def fake_process(video_info, **kwargs):
         received["video_info"] = video_info
@@ -234,6 +244,7 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
                     page_number=2,
                     title="第 2 章",
                     output_path=part_path,
+                    transcript=transcript,
                 ),
             ),
             summary_path=summary_path,
@@ -265,6 +276,7 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
     assert result.succeeded_count == 1
     assert result.parts[0].markdown == "# 视频主题\n第二章\n"
     assert result.parts[0].filename == part_path.name
+    assert result.parts[0].transcript is transcript
     assert result.summary_markdown == "# 视频整体主题\n合集总结\n"
     assert result.summary_filename == "summary.md"
     assert result.collection_summary_requested is True
@@ -418,6 +430,7 @@ def test_generate_notes_converts_multi_part_statuses_and_summary_failure(
             PartProcessingResult(
                 3,
                 "第三章",
+                transcript=_transcript("第三章字幕"),
                 error="模型生成失败",
                 error_type="processing_failed",
             ),
@@ -444,6 +457,8 @@ def test_generate_notes_converts_multi_part_statuses_and_summary_failure(
     assert result.parts[0].markdown == "# 视频主题\n第一章\n"
     assert result.parts[1].error_type == "no_subtitle"
     assert result.parts[2].error_type == "processing_failed"
+    assert result.parts[2].transcript is not None
+    assert result.parts[2].transcript.plain_text == "第三章字幕"
     assert result.summary_markdown is None
     assert result.summary_error == "课程总结生成失败"
     assert result.collection_summary_requested is True

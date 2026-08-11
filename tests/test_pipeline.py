@@ -10,6 +10,7 @@ from pipeline import (
     safe_filename,
     save_part_notes,
 )
+from transcript import Transcript, TranscriptCue
 
 
 def _collection() -> VideoCollection:
@@ -22,6 +23,14 @@ def _collection() -> VideoCollection:
             VideoPart(2, "第 2 分P", "https://example.test?p=2"),
             VideoPart(3, "第 3 分P", "https://example.test?p=3"),
         ),
+    )
+
+
+def _transcript(text: str) -> Transcript:
+    return Transcript(
+        source="bilibili",
+        language="zh-CN",
+        cues=(TranscriptCue(0.0, 1.0, text),),
     )
 
 
@@ -53,8 +62,7 @@ def test_single_part_pipeline_passes_web_options_and_keeps_output_name(
         bvid=collection.bvid,
         title="真实视频标题",
         description="真实视频简介",
-        subtitle_language="zh-CN",
-        subtitle_text="字幕正文",
+        transcript=_transcript("字幕正文"),
     )
 
     def fake_fetch(url: str, **kwargs: object) -> VideoSubtitle:
@@ -85,6 +93,7 @@ def test_single_part_pipeline_passes_web_options_and_keeps_output_name(
         "extra_instruction": "重点解释代码。",
     }
     assert report.video is video
+    assert report.video.transcript.plain_text == "字幕正文"
     assert report.output_path == tmp_path / "BV1DfrdByE2Hx_study_notes.md"
     assert report.output_path.read_text(encoding="utf-8") == "# 视频主题\n单P笔记\n"
 
@@ -103,8 +112,7 @@ def test_multi_part_processing_skips_failures_and_creates_summary(
             bvid="BV1DfrdByE2Hx",
             title={1: "第一章", 3: "第三章"}[page],
             description="",
-            subtitle_language="zh-CN",
-            subtitle_text=f"P{page} 字幕",
+            transcript=_transcript(f"P{page} 字幕"),
         )
 
     def fake_notes(subtitle_text: str, **_kwargs: str) -> str:
@@ -134,6 +142,11 @@ def test_multi_part_processing_skips_failures_and_creates_summary(
     assert report.parts[0].error_type is None
     assert report.parts[1].error_type == "no_subtitle"
     assert report.parts[2].error_type == "processing_failed"
+    assert report.parts[0].transcript is not None
+    assert report.parts[0].transcript.plain_text == "P1 字幕"
+    assert report.parts[1].transcript is None
+    assert report.parts[2].transcript is not None
+    assert report.parts[2].transcript.plain_text == "P3 字幕"
     assert report.collection_summary_requested is True
     assert report.summary_path == tmp_path / "BV1DfrdByE2Hx" / "summary.md"
     assert report.summary_path.exists()
@@ -168,8 +181,7 @@ def test_pipeline_only_processes_selected_part_and_keeps_page_number(
             bvid=collection.bvid,
             title="第三章",
             description="",
-            subtitle_language="zh-CN",
-            subtitle_text="仅有 P3 字幕",
+            transcript=_transcript("仅有 P3 字幕"),
         )
 
     def fake_notes(subtitle_text: str, **kwargs: str) -> str:
@@ -220,8 +232,7 @@ def test_multi_part_pipeline_passes_extra_instruction_only_to_part_notes(
             bvid=collection.bvid,
             title=f"第 {page_number} 章",
             description="",
-            subtitle_language="zh-CN",
-            subtitle_text=f"P{page_number} 字幕",
+            transcript=_transcript(f"P{page_number} 字幕"),
         )
 
     def fake_notes(_subtitle_text: str, **kwargs: str) -> str:
@@ -267,8 +278,7 @@ def test_pipeline_defaults_to_processing_all_parts(tmp_path: Path) -> None:
             bvid=collection.bvid,
             title=f"第 {page_number} 章",
             description="",
-            subtitle_language="zh-CN",
-            subtitle_text=f"P{page_number} 字幕",
+            transcript=_transcript(f"P{page_number} 字幕"),
         )
 
     def fake_notes(subtitle_text: str, **kwargs: str) -> str:
@@ -307,8 +317,7 @@ def test_pipeline_skips_unrequested_collection_summary_and_keeps_part_notes(
             bvid=collection.bvid,
             title=f"第 {page_number} 章",
             description="",
-            subtitle_language="zh-CN",
-            subtitle_text=f"P{page_number} 字幕",
+            transcript=_transcript(f"P{page_number} 字幕"),
         )
 
     def fake_summary(*args: object, **_kwargs: object) -> str:
@@ -330,6 +339,7 @@ def test_pipeline_skips_unrequested_collection_summary_and_keeps_part_notes(
     assert report.summary_error is None
     assert report.succeeded_count == 3
     assert all(result.error_type is None for result in report.parts)
+    assert all(result.transcript is not None for result in report.parts)
     assert sorted(path.name for path in output_dir.glob("P*.md")) == [
         "P01_第_1_章.md",
         "P02_第_2_章.md",

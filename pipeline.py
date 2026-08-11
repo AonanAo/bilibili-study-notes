@@ -16,6 +16,7 @@ from bilibili import (
     fetch_video_subtitle,
 )
 from llm import LLMError, generate_course_summary, generate_study_notes
+from transcript import Transcript
 
 
 # Windows/macOS/Linux 都不适合出现在文件名中的字符。
@@ -32,6 +33,7 @@ class PartProcessingResult:
     output_path: Path | None = None
     error: str | None = None
     error_type: PartErrorType | None = None
+    transcript: Transcript | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -219,6 +221,7 @@ def process_multi_part_video(
                 cookies_from_browser=cookies_from_browser,
             )
             result.title = video.title
+            result.transcript = video.transcript
             emit(f"[P{part.page_number:02d}] 正在调用 DeepSeek：{result.title}")
             note_options = {
                 "video_title": video.title,

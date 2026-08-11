@@ -25,6 +25,7 @@ from pipeline import (
 )
 from prompt import NoteMode, get_selectable_note_modes
 from selection import PartSelectionError, select_video_parts
+from transcript import Transcript
 
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
@@ -40,6 +41,7 @@ class WebPartResult:
     error: str | None = None
     markdown: str | None = None
     filename: str | None = None
+    transcript: Transcript | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -125,12 +127,14 @@ def _read_single_part_report(report: SinglePartReport) -> WebPartResult:
             error_type="processing_failed",
             error=f"读取已生成笔记失败：{error}",
             filename=report.output_path.name,
+            transcript=report.video.transcript,
         )
     return WebPartResult(
         page_number=1,
         title=report.video.title,
         markdown=markdown,
         filename=report.output_path.name,
+        transcript=report.video.transcript,
     )
 
 
@@ -144,6 +148,7 @@ def _read_multi_part_result(result: PartProcessingResult) -> WebPartResult:
             error_type=result.error_type or "processing_failed",
             error=_web_error_message(result.error),
             filename=result.output_path.name if result.output_path else None,
+            transcript=result.transcript,
         )
 
     try:
@@ -155,12 +160,14 @@ def _read_multi_part_result(result: PartProcessingResult) -> WebPartResult:
             error_type="processing_failed",
             error=f"读取已生成笔记失败：{error}",
             filename=result.output_path.name,
+            transcript=result.transcript,
         )
     return WebPartResult(
         page_number=result.page_number,
         title=result.title,
         markdown=markdown,
         filename=result.output_path.name,
+        transcript=result.transcript,
     )
 
 
