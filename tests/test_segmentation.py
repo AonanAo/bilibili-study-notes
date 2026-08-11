@@ -133,6 +133,76 @@ def test_equal_cross_boundary_overlap_deterministically_goes_to_earlier_segment(
     assert tied not in assigned[1].transcript.cues
 
 
+def test_small_internal_gap_cues_are_assigned_to_nearest_segment() -> None:
+    tied = TranscriptCue(9.0, 11.0, "内部空隙且距离相同")
+    near_right = TranscriptCue(13.0, 15.0, "更靠近后段")
+    assigned = assign_cues_to_segments(
+        _transcript(
+            TranscriptCue(0.0, 5.0, "前段内容"),
+            tied,
+            near_right,
+            TranscriptCue(15.0, 20.0, "后段内容"),
+        ),
+        SegmentPlan(
+            (
+                SemanticSegment("前段", 0.0, 5.0),
+                SemanticSegment("后段", 15.0, 20.0),
+            )
+        ),
+    )
+
+    assert [cue.text for cue in assigned[0].transcript.cues] == [
+        "前段内容",
+        "内部空隙且距离相同",
+    ]
+    assert [cue.text for cue in assigned[1].transcript.cues] == [
+        "更靠近后段",
+        "后段内容",
+    ]
+
+
+def test_boundary_repair_limit_is_applied_per_semantic_boundary() -> None:
+    assigned = assign_cues_to_segments(
+        _transcript(
+            TranscriptCue(0.0, 5.0, "第一段"),
+            TranscriptCue(5.0, 15.0, "边界一过渡"),
+            TranscriptCue(15.0, 20.0, "第二段"),
+            TranscriptCue(20.0, 30.0, "边界二过渡"),
+            TranscriptCue(30.0, 35.0, "第三段"),
+        ),
+        SegmentPlan(
+            (
+                SemanticSegment("第一段", 0.0, 5.0),
+                SemanticSegment("第二段", 15.0, 20.0),
+                SemanticSegment("第三段", 30.0, 35.0),
+            )
+        ),
+    )
+
+    all_text = [cue.text for segment in assigned for cue in segment.transcript.cues]
+    assert sorted(all_text) == sorted(
+        ["第一段", "边界一过渡", "第二段", "边界二过渡", "第三段"]
+    )
+
+
+def test_large_internal_content_gap_is_not_silently_repaired() -> None:
+    with pytest.raises(SegmentationError, match="内部边界遗漏了大段"):
+        assign_cues_to_segments(
+            _transcript(
+                TranscriptCue(0.0, 5.0, "前段内容"),
+                TranscriptCue(5.0, 15.0, "遗漏内容一"),
+                TranscriptCue(15.0, 21.0, "遗漏内容二"),
+                TranscriptCue(25.0, 30.0, "后段内容"),
+            ),
+            SegmentPlan(
+                (
+                    SemanticSegment("前段", 0.0, 5.0),
+                    SemanticSegment("后段", 25.0, 30.0),
+                )
+            ),
+        )
+
+
 def test_short_boundary_cue_outside_plan_is_tolerated() -> None:
     assigned = assign_cues_to_segments(
         _transcript(

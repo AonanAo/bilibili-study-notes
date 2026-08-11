@@ -14,6 +14,9 @@ from transcript import Transcript, TranscriptCue
 # 不按视频总时长放大容差，避免长视频漏掉几十秒内容仍被接受。
 MAX_OMITTED_CUE_SECONDS = 1.5
 MAX_TOTAL_OMITTED_SECONDS = 3.0
+# 相邻语义段之间常有模型四舍五入造成的小空隙。只修复每个边界内
+# 实际字幕覆盖不超过该值的内容，避免把模型漏掉的完整章节硬塞给邻段。
+MAX_REPAIRABLE_BOUNDARY_CONTENT_SECONDS = 15.0
 PROGRAM_STRUCTURE_PATTERN = re.compile(
     r"^\s*(?:#{1,2}\s+.+|#{3,6}\s*(?:总结重点|本段概要)\s*|\*\*时间：.+\*\*)$",
     re.MULTILINE,
@@ -172,6 +175,38 @@ def _cue_overlap_seconds(cue: TranscriptCue, segment: SemanticSegment) -> float:
     )
 
 
+def _internal_gap_index(
+    cue: TranscriptCue,
+    segments: tuple[SemanticSegment, ...],
+) -> int | None:
+    """返回 cue 所处内部空隙右侧的分段索引。"""
+
+    for right_index in range(1, len(segments)):
+        left = segments[right_index - 1]
+        right = segments[right_index]
+        if cue.start_seconds >= left.end_seconds and cue.end_seconds <= right.start_seconds:
+            return right_index
+    return None
+
+
+def _covered_seconds(cues: list[TranscriptCue]) -> float:
+    """计算 cue 时间范围的并集长度，避免重叠字幕被重复计数。"""
+
+    if not cues:
+        return 0.0
+    total = 0.0
+    current_start = cues[0].start_seconds
+    current_end = cues[0].end_seconds
+    for cue in cues[1:]:
+        if cue.start_seconds <= current_end:
+            current_end = max(current_end, cue.end_seconds)
+        else:
+            total += current_end - current_start
+            current_start = cue.start_seconds
+            current_end = cue.end_seconds
+    return total + current_end - current_start
+
+
 def assign_cues_to_segments(
     transcript: Transcript,
     plan: SegmentPlan,
@@ -185,9 +220,10 @@ def assign_cues_to_segments(
     if not transcript.cues:
         raise SegmentationError("字幕没有有效 cue，无法生成分段笔记。")
 
-    assigned: list[list[TranscriptCue]] = [[] for _segment in plan.segments]
-    omitted: list[TranscriptCue] = []
-    for cue in transcript.cues:
+    assignments: list[int | None] = []
+    internal_gap_positions: dict[int, list[int]] = {}
+    outside_positions: list[int] = []
+    for cue_position, cue in enumerate(transcript.cues):
         best_index: int | None = None
         best_overlap = 0.0
         for index, segment in enumerate(plan.segments):
@@ -195,11 +231,40 @@ def assign_cues_to_segments(
             if overlap > best_overlap:
                 best_index = index
                 best_overlap = overlap
-        if best_index is None:
-            omitted.append(cue)
+        assignments.append(best_index)
+        if best_index is not None:
+            continue
+        gap_index = _internal_gap_index(cue, plan.segments)
+        if gap_index is None:
+            outside_positions.append(cue_position)
         else:
-            assigned[best_index].append(cue)
+            internal_gap_positions.setdefault(gap_index, []).append(cue_position)
 
+    for right_index, positions in internal_gap_positions.items():
+        gap_cues = [transcript.cues[position] for position in positions]
+        covered_seconds = _covered_seconds(gap_cues)
+        if covered_seconds > MAX_REPAIRABLE_BOUNDARY_CONTENT_SECONDS:
+            raise SegmentationError(
+                "相邻分段的内部边界遗漏了大段有效字幕："
+                f"分段 {right_index} 与 {right_index + 1} 之间覆盖 "
+                f"{covered_seconds:.3f} 秒；允许自动补配不超过 "
+                f"{MAX_REPAIRABLE_BOUNDARY_CONTENT_SECONDS:.1f} 秒。"
+            )
+
+        left = plan.segments[right_index - 1]
+        right = plan.segments[right_index]
+        for position in positions:
+            cue = transcript.cues[position]
+            distance_to_left = cue.start_seconds - left.end_seconds
+            distance_to_right = right.start_seconds - cue.end_seconds
+            # 距离相同时固定归较早分段，保持规则确定且可测试。
+            assignments[position] = (
+                right_index - 1
+                if distance_to_left <= distance_to_right
+                else right_index
+            )
+
+    omitted = [transcript.cues[position] for position in outside_positions]
     if omitted:
         omitted_durations = [cue.end_seconds - cue.start_seconds for cue in omitted]
         if (
@@ -213,6 +278,11 @@ def assign_cues_to_segments(
                 f"允许每条不超过 {MAX_OMITTED_CUE_SECONDS:.1f} 秒且"
                 f"累计不超过 {MAX_TOTAL_OMITTED_SECONDS:.1f} 秒。"
             )
+
+    assigned: list[list[TranscriptCue]] = [[] for _segment in plan.segments]
+    for cue, segment_index in zip(transcript.cues, assignments):
+        if segment_index is not None:
+            assigned[segment_index].append(cue)
 
     empty_segments = [index for index, cues in enumerate(assigned, start=1) if not cues]
     if empty_segments:
