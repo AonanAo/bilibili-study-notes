@@ -26,6 +26,7 @@ from prompt import (
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
+MAX_OUTPUT_TOKENS = 8192
 
 REQUIRED_SUMMARY_HEADINGS = (
     "# 视频整体主题",
@@ -67,11 +68,37 @@ def _clean_markdown(markdown: str) -> str:
     return content
 
 
+def _ensure_level_one_heading(
+    markdown: str,
+    required_headings: tuple[str, ...],
+) -> str:
+    """模型省略一级标题时，补回约定的文档标题。"""
+
+    if any(line.strip().startswith("# ") for line in markdown.splitlines()):
+        return markdown
+    required_title = next(
+        (heading for heading in required_headings if heading.startswith("# ")),
+        None,
+    )
+    if required_title is None:
+        return markdown
+    return f"{required_title}\n\n{markdown}"
+
+
 def _validate_markdown(markdown: str, required_headings: tuple[str, ...]) -> None:
     """检查 Markdown 是否包含约定的所有章节。"""
 
     lines = {line.strip() for line in markdown.splitlines()}
-    missing = [heading for heading in required_headings if heading not in lines]
+    has_level_one_heading = any(
+        line.startswith("# ") and line[2:].strip() for line in lines
+    )
+    missing = [
+        heading
+        for heading in required_headings
+        if heading not in lines
+        # 模型可以把“# 视频主题”替换成更具体的实际主题；二级章节仍需完全一致。
+        and not (heading.startswith("# ") and has_level_one_heading)
+    ]
     if missing:
         raise InvalidLLMResponseError(
             "DeepSeek 返回的 Markdown 缺少必要章节：" + "、".join(missing)
@@ -97,15 +124,45 @@ def _request_markdown(
     client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
 
     try:
-        response = client.chat.completions.create(
-            model=selected_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_tokens=4096,
-            stream=False,
-        )
+        for attempt in range(2):
+            response = client.chat.completions.create(
+                model=selected_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=MAX_OUTPUT_TOKENS,
+                stream=False,
+                # 学习笔记是结构化整理任务，关闭默认思考模式，把生成额度留给正文。
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+
+            if not response.choices:
+                if attempt == 0:
+                    continue
+                raise InvalidLLMResponseError(
+                    "DeepSeek 连续两次没有返回可用结果，请稍后重试。"
+                )
+
+            choice = response.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                raise InvalidLLMResponseError(
+                    "DeepSeek 输出达到长度上限，返回的学习笔记不完整。请重试；"
+                    "如果仍然失败，请改用 technical 或 course 模式。"
+                )
+
+            raw_content = choice.message.content
+            if not isinstance(raw_content, str) or not raw_content.strip():
+                if attempt == 0:
+                    continue
+                raise InvalidLLMResponseError(
+                    "DeepSeek 连续两次返回了空的 Markdown，请稍后重试。"
+                )
+
+            markdown = _clean_markdown(raw_content)
+            markdown = _ensure_level_one_heading(markdown, required_headings)
+            _validate_markdown(markdown, required_headings)
+            return markdown
     except AuthenticationError as error:
         raise LLMRequestError("身份验证失败，请检查 DEEPSEEK_API_KEY。") from error
     except RateLimitError as error:
@@ -119,16 +176,7 @@ def _request_markdown(
     except OpenAIError as error:
         raise LLMRequestError(f"DeepSeek API 请求失败：{error}") from error
 
-    if not response.choices:
-        raise InvalidLLMResponseError("DeepSeek 没有返回可用结果。")
-
-    raw_content = response.choices[0].message.content
-    if not isinstance(raw_content, str) or not raw_content.strip():
-        raise InvalidLLMResponseError("DeepSeek 返回了空的 Markdown。")
-
-    markdown = _clean_markdown(raw_content)
-    _validate_markdown(markdown, required_headings)
-    return markdown
+    raise InvalidLLMResponseError("DeepSeek 没有返回可用结果。")
 
 
 def generate_study_notes(

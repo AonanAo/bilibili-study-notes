@@ -83,25 +83,34 @@ Python 普通课程
 
 
 class FakeCompletions:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, finish_reason: str = "stop") -> None:
         self.content = content
+        self.finish_reason = finish_reason
         self.calls: list[dict] = []
 
     def create(self, **kwargs: object) -> SimpleNamespace:
         self.calls.append(kwargs)
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))]
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=self.content),
+                    finish_reason=self.finish_reason,
+                )
+            ]
         )
 
 
 class FakeOpenAI:
     content = VALID_NOTES
+    finish_reason = "stop"
     instances: list["FakeOpenAI"] = []
 
     def __init__(self, *, api_key: str, base_url: str) -> None:
         self.api_key = api_key
         self.base_url = base_url
-        self.chat = SimpleNamespace(completions=FakeCompletions(self.content))
+        self.chat = SimpleNamespace(
+            completions=FakeCompletions(self.content, self.finish_reason)
+        )
         self.instances.append(self)
 
 
@@ -145,7 +154,9 @@ def test_generate_notes_calls_deepseek_and_returns_markdown(
     assert client.base_url == "https://api.deepseek.com"
     call = client.chat.completions.calls[0]
     assert call["model"] == "deepseek-v4-flash"
+    assert call["max_tokens"] == 8192
     assert call["stream"] is False
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
     assert "Python 变量字幕" in call["messages"][1]["content"]
 
 
@@ -174,6 +185,97 @@ def test_generate_notes_rejects_incomplete_markdown(
 
     with pytest.raises(llm.InvalidLLMResponseError, match="缺少必要章节"):
         llm.generate_study_notes("字幕")
+
+
+def test_generate_notes_accepts_specific_level_one_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = VALID_NOTES.replace(
+        "# 视频主题",
+        "# Agent 的概念、原理与构建模式",
+        1,
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    result = llm.generate_study_notes("字幕")
+
+    assert result.startswith("# Agent 的概念、原理与构建模式")
+
+
+def test_generate_notes_restores_omitted_level_one_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = VALID_NOTES.replace("# 视频主题\n", "", 1)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    result = llm.generate_study_notes("字幕")
+
+    assert result.startswith("# 视频主题\n\nPython 基础")
+
+
+def test_generate_notes_reports_truncated_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = VALID_NOTES
+    monkeypatch.setattr(FakeOpenAI, "finish_reason", "length")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    with pytest.raises(llm.InvalidLLMResponseError, match="长度上限"):
+        llm.generate_study_notes("字幕")
+
+
+def test_generate_notes_retries_one_empty_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class EmptyThenValidCompletions(FakeCompletions):
+        def create(self, **kwargs: object) -> SimpleNamespace:
+            self.calls.append(kwargs)
+            content = "" if len(self.calls) == 1 else VALID_NOTES
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content=content),
+                        finish_reason="stop",
+                    )
+                ]
+            )
+
+    class EmptyThenValidOpenAI(FakeOpenAI):
+        def __init__(self, *, api_key: str, base_url: str) -> None:
+            self.api_key = api_key
+            self.base_url = base_url
+            self.chat = SimpleNamespace(completions=EmptyThenValidCompletions(""))
+            self.instances.append(self)
+
+    EmptyThenValidOpenAI.instances.clear()
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", EmptyThenValidOpenAI)
+
+    result = llm.generate_study_notes("字幕")
+
+    assert result == VALID_NOTES.strip()
+    completions = EmptyThenValidOpenAI.instances[0].chat.completions
+    assert len(completions.calls) == 2
+
+
+def test_generate_notes_rejects_two_empty_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = ""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    with pytest.raises(llm.InvalidLLMResponseError, match="连续两次返回了空"):
+        llm.generate_study_notes("字幕")
+
+    assert len(FakeOpenAI.instances[0].chat.completions.calls) == 2
 
 
 @pytest.mark.parametrize(

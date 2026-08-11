@@ -1,6 +1,6 @@
 # B 站视频 AI 学习笔记工具
 
-输入一个 B 站视频链接或 BV 号，先获取视频字幕，再调用 DeepSeek API 生成 Markdown 学习笔记。支持自动检测同一 BV 号下的多 P 视频，逐 P 生成笔记后再生成课程总结。
+输入一个 B 站视频链接或 BV 号，先获取视频字幕，再调用 DeepSeek API 生成 Markdown 学习笔记。项目同时提供命令行和 Streamlit 网页入口，支持自动检测同一 BV 号下的多 P 视频，逐 P 生成笔记后再生成课程总结。
 
 项目使用维护活跃的开源项目 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 解析 B 站页面和字幕接口，不自行模拟浏览器请求。
 模型调用使用 DeepSeek 官方文档推荐的 OpenAI Python SDK 兼容接口。
@@ -13,9 +13,9 @@
 ├── llm.py               # DeepSeek API 调用模块
 ├── prompt.py            # 笔记模式、分 P 笔记和课程总结提示词
 ├── selection.py         # 分 P 选择表达式解析与校验
-├── pipeline.py          # 多 P 容错、文件保存和合集总结流程
+├── pipeline.py          # 单 P、多 P、文件保存和合集总结流程
 ├── main.py              # 命令行入口
-├── web_service.py       # 网页与现有视频解析能力之间的轻量适配层
+├── web_service.py       # 网页参数、生成流程和展示结果适配层
 ├── streamlit_app.py     # Streamlit 网页入口
 ├── outputs/             # 生成的 Markdown 学习笔记
 ├── requirements.txt     # 运行依赖
@@ -76,6 +76,8 @@ export DEEPSEEK_MODEL="deepseek-v4-pro"
 
 ## 运行
 
+### 命令行入口
+
 直接在命令后面传入视频链接：
 
 ```bash
@@ -101,7 +103,7 @@ python main.py "BV1DfrdByE2Hx"
 
 也可以只运行 `python main.py`，然后根据提示粘贴链接。
 
-## 网页预览（v0.2.3.1）
+### Streamlit 网页入口
 
 安装依赖后启动 Streamlit：
 
@@ -109,14 +111,54 @@ python main.py "BV1DfrdByE2Hx"
 streamlit run streamlit_app.py
 ```
 
-浏览器会打开本地页面。输入 B 站视频链接或 BV 号并点击“解析视频”，页面会展示：
+浏览器会打开本地页面。网页入口与命令行复用相同的解析、字幕、Prompt 和生成流程，不会在页面代码中重复业务逻辑。
+
+输入 B 站视频链接或 BV 号并点击“解析视频”，页面会展示：
 
 - 视频或课程标题
 - BV号
 - 视频简介
 - 全部分P编号和标题
 
-v0.2.3.1 的网页只验证“网页入口 → 现有视频解析能力”链路，暂不提供 Cookie、字幕获取、DeepSeek调用、分P选择或学习笔记生成。使用这个网页预览功能不需要配置 DeepSeek API Key；命令行笔记生成仍保持原有用法。
+解析成功后可以：
+
+- 为多 P 视频选择全部、单个、多个或连续范围的分 P
+- 选择默认、`technical` 或 `course` 笔记模式
+- 填写可选的额外学习要求
+- 在生成期间查看字幕获取、模型调用和文件保存状态
+- 在线查看生成的 Markdown 笔记
+- 分别下载单 P、各成功分 P 和 `summary.md`
+
+网页会明确区分以下处理状态：
+
+- 成功生成的分 P
+- 没有可用字幕的分 P
+- 字幕获取、模型调用或文件处理失败的分 P
+- `summary.md` 生成或读取失败
+
+单 P 和多 P 的输出位置与命令行完全一致。单 P 保存为：
+
+```text
+outputs/BV号_study_notes.md
+```
+
+多 P 保存到独立的 BV 目录，成功的分 P 和课程总结都可以在网页中查看和下载。
+
+只解析视频信息不需要 DeepSeek API Key；点击“生成学习笔记”前需要配置 `DEEPSEEK_API_KEY`。
+
+如果 B 站要求登录后才能读取字幕，请在解析视频前通过“B站登录浏览器”选择 Chrome、Edge、Firefox 或 Safari。所选浏览器需要已经登录 B 站；不需要登录的视频可以保持“不使用 Cookie”。
+
+Cookie 由本机 yt-dlp 直接读取，网页不会显示或保存 Cookie，也不会把 Cookie 发送给 DeepSeek。如果读取失败，可以先关闭所选浏览器后重试；macOS 首次读取时也可能要求授权访问钥匙串。
+
+### CLI 与 Web 的关系
+
+```text
+命令行：main.py ───────────────┐
+                               ├─→ pipeline.py → bilibili.py / llm.py / prompt.py
+网页：streamlit_app.py → web_service.py ┘
+```
+
+新增网页入口没有改变原有命令行参数、默认模式、文件名和输出目录结构。
 
 ### 笔记生成模式
 
@@ -137,6 +179,8 @@ python main.py "BV视频编号" --mode course
 不传 `--mode` 时继续使用 v0.1 的原有笔记结构。`academic` 学术阅读模式已经预留配置接口，但当前版本暂不开放选择。
 
 直接执行 `python main.py` 进入交互模式时，可以通过编号选择模式；直接回车使用原有默认模板。
+
+Streamlit 页面提供相同的默认、`technical` 和 `course` 选择。额外学习要求可以在网页文本框中填写，它只影响单个视频或各分 P 的笔记，不改变 `summary.md` 的固定合集总结结构。
 
 ### 多 P 视频
 
@@ -161,6 +205,8 @@ python main.py "BV多P视频编号" --parts "1,3,5-8" --mode technical
 选择表达式支持单个编号、逗号分隔的多个编号和连续范围。重复编号会自动去重，处理顺序始终按视频原始分 P 顺序排列；非法格式或不存在的分 P 会在开始获取字幕前明确提示。
 
 直接执行 `python main.py` 进入交互模式时，程序会先显示全部分 P 标题，再询问需要处理的分 P。直接回车仍然处理全部分 P。
+
+Streamlit 页面使用完全相同的选择规则。留空处理全部分 P，也可以输入 `3`、`1,3,5` 或 `1,3,5-8`。
 
 输出结构：
 
@@ -187,6 +233,8 @@ outputs/
 - 本次成功与失败的分 P 状态
 
 因此，一个共 N 个分 P 且全部成功的视频，会调用 N 次分 P 笔记生成和 1 次课程总结生成。
+
+网页只展示本次选择产生的处理报告，不会扫描并混入输出目录中的历史文件。如果课程总结失败，已经成功生成的分 P 笔记仍会保留，并可继续查看和下载。
 
 ### 字幕需要登录时
 
@@ -246,7 +294,7 @@ notes = generate_study_notes(
     video_title=video.title,
     video_description=video.description,
     mode="technical",
-    # 只在 Python 调用接口中提供；当前命令行不开放额外要求参数。
+    # 网页和 Python 接口支持；当前命令行不开放额外要求参数。
     extra_instruction="请重点解释代码实现和设计原因。",
 )
 
@@ -269,11 +317,13 @@ pytest -q
 - 同一 BV 号下的多 P 视频默认自动处理全部分 P，也可以用 `--parts` 选择部分分 P；输入链接中的 `?p=` 不会代替 `--parts`。
 - 支持 `technical` 和 `course` 两种可选笔记模式；不指定时沿用 v0.1 默认模板。
 - `course` 只控制单P笔记结构，`summary.md` 仍使用独立、固定的合集总结流程。
+- Streamlit 页面支持生成状态显示、Markdown 在线查看和单文件下载。
 - 多语言字幕优先返回简体中文，否则返回第一个可用语言。
 - 弹幕不当作字幕。
 - 只处理同一 BV 号内的分 P，不扩展为 UP 主播放列表或其他视频合集。
 - 不会下载视频或音频文件。
 - DeepSeek 返回的 Markdown 必须包含所有约定章节，否则程序会明确报错且不会保存不完整文件。
-- 当前提供只解析和展示视频信息的 Streamlit 预览页面，尚未在网页中接入笔记生成。
-- 当前不包含数据库或 RAG。
+- 当前不包含数据库、RAG、用户系统或多用户数据隔离。
+- Streamlit 页面可以选择本机已登录 B 站的 Chrome、Edge、Firefox 或 Safari，由 yt-dlp 读取 Cookie；页面不接收、显示或保存 Cookie 原文。
+- 下载功能以单个 Markdown 文件为单位，不生成 ZIP 压缩包。
 - B 站接口会变化；遇到解析问题时，先执行 `python -m pip install -U yt-dlp`。

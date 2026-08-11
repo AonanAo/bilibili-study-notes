@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
@@ -159,6 +160,44 @@ def _page_number_from_url(url: str, fallback: int) -> int:
     return page_number if page_number > 0 else fallback
 
 
+def _fetch_collection_metadata(
+    downloader: YoutubeDL,
+    bvid: str,
+) -> tuple[str, str, dict[int, str]]:
+    """用一次公开接口请求补齐合集简介和全部分 P 标题。"""
+
+    metadata_url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
+    try:
+        with downloader.urlopen(metadata_url) as response:
+            payload = json.load(response)
+    except Exception:
+        # 这是补充数据源；失败时继续使用 yt-dlp 已有字段和原兜底值。
+        return "", "", {}
+
+    if not isinstance(payload, dict) or payload.get("code") != 0:
+        return "", "", {}
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return "", "", {}
+
+    title = data.get("title") if isinstance(data.get("title"), str) else ""
+    description = data.get("desc") if isinstance(data.get("desc"), str) else ""
+    part_titles: dict[int, str] = {}
+    for page in data.get("pages") or ():
+        if not isinstance(page, dict):
+            continue
+        page_number = page.get("page")
+        part_title = page.get("part")
+        if (
+            isinstance(page_number, int)
+            and page_number > 0
+            and isinstance(part_title, str)
+            and part_title.strip()
+        ):
+            part_titles[page_number] = part_title.strip()
+    return title.strip(), description.strip(), part_titles
+
+
 def get_video_parts(
     video_input: str,
     *,
@@ -174,6 +213,9 @@ def get_video_parts(
     bvid = extract_bvid(video_input)
     request_url = _canonical_video_url(bvid)
     logger = _YtDlpLogger()
+    supplemental_title = ""
+    supplemental_description = ""
+    supplemental_part_titles: dict[int, str] = {}
     options: dict = {
         "skip_download": True,
         "extract_flat": True,
@@ -187,13 +229,23 @@ def get_video_parts(
     try:
         with YoutubeDL(options) as downloader:
             info = downloader.extract_info(request_url, download=False)
+            if info.get("_type") == "playlist":
+                (
+                    supplemental_title,
+                    supplemental_description,
+                    supplemental_part_titles,
+                ) = _fetch_collection_metadata(downloader, bvid)
     except YoutubeDLError as error:
         raise BilibiliFetchError(f"获取分 P 列表失败：{error}") from error
     except (OSError, ValueError) as error:
         raise BilibiliFetchError(f"获取分 P 列表失败：{error}") from error
 
-    collection_title = (info.get("title") or "未知标题").strip()
-    collection_description = (info.get("description") or "").strip()
+    collection_title = (
+        info.get("title") or supplemental_title or "未知标题"
+    ).strip()
+    collection_description = (
+        info.get("description") or supplemental_description or ""
+    ).strip()
 
     if info.get("_type") != "playlist":
         return VideoCollection(
@@ -218,7 +270,11 @@ def get_video_parts(
         parts.append(
             VideoPart(
                 page_number=page_number,
-                title=(entry.get("title") or f"第 {page_number} 分P").strip(),
+                title=(
+                    entry.get("title")
+                    or supplemental_part_titles.get(page_number)
+                    or f"第 {page_number} 分P"
+                ).strip(),
                 url=entry_url,
             )
         )

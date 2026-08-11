@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
+import re
+
 import streamlit as st
 
 import web_service
+
+
+BROWSER_OPTIONS = (None, "chrome", "edge", "firefox", "safari")
+BROWSER_LABELS = {
+    None: "不使用 Cookie",
+    "chrome": "Chrome",
+    "edge": "Edge",
+    "firefox": "Firefox",
+    "safari": "Safari",
+}
+
+
+def _format_description_markdown(description: str) -> str:
+    """保留简介换行，同时避免普通文本被 Markdown 识别成标题。"""
+
+    formatted_lines: list[str] = []
+    for line in description.splitlines():
+        # B 站简介常用连续等号或横线作分隔符，Markdown 会把上一行放大成标题。
+        if re.fullmatch(r"\s*(=+|-+|_+|\*+)\s*", line):
+            leading_spaces = line[: len(line) - len(line.lstrip())]
+            line = f"{leading_spaces}\\{line.lstrip()}"
+        # 简介里的井号是普通文本，不应成为页面标题。
+        line = re.sub(r"^(\s*)(#{1,6})(\s+)", r"\1\\\2\3", line)
+        formatted_lines.append(line)
+    return "  \n".join(formatted_lines)
 
 
 def render_video_info(video_info: web_service.VideoCollection) -> None:
@@ -15,7 +42,7 @@ def render_video_info(video_info: web_service.VideoCollection) -> None:
 
     if video_info.description:
         st.markdown("#### 视频简介")
-        st.write(video_info.description)
+        st.markdown(_format_description_markdown(video_info.description))
     else:
         st.caption("该视频没有提供简介。")
 
@@ -30,6 +57,12 @@ def _format_note_mode(mode: web_service.NoteMode | None) -> str:
     if mode is None:
         return "默认学习笔记（兼容旧版本）"
     return f"{mode.name}（{mode.key}）"
+
+
+def _format_browser(browser: str | None) -> str:
+    """显示网页 Cookie 浏览器选择的中文标签。"""
+
+    return BROWSER_LABELS[browser]
 
 
 def _render_download_button(
@@ -162,6 +195,7 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 selected_parts=selected_parts,
                 note_mode=note_mode.key if note_mode is not None else None,
                 extra_instruction=extra_instruction.strip() or None,
+                cookies_from_browser=st.session_state.cookies_from_browser,
                 on_event=show_event,
             )
         except web_service.PartSelectionError as error:
@@ -189,11 +223,22 @@ if "video_info" not in st.session_state:
     st.session_state.video_info = None
 if "generation_result" not in st.session_state:
     st.session_state.generation_result = None
+if "cookies_from_browser" not in st.session_state:
+    st.session_state.cookies_from_browser = None
 
 with st.form("video_info_form"):
     video_input = st.text_input(
         "B站视频链接或BV号",
         placeholder="例如：https://www.bilibili.com/video/BVxxxx 或 BVxxxx",
+    )
+    cookies_from_browser = st.selectbox(
+        "B站登录浏览器（可选）",
+        options=BROWSER_OPTIONS,
+        format_func=_format_browser,
+        help=(
+            "如果视频字幕需要登录，请选择已经登录 B站的浏览器。"
+            "Cookie 只由本机 yt-dlp 读取，不会保存或发送给 DeepSeek。"
+        ),
     )
     submitted = st.form_submit_button("解析视频", type="primary")
 
@@ -201,9 +246,13 @@ if submitted:
     # 每次开始解析时先清空旧结果，避免失败后仍显示上一个视频。
     st.session_state.video_info = None
     st.session_state.generation_result = None
+    st.session_state.cookies_from_browser = cookies_from_browser
     try:
         with st.spinner("正在解析视频信息……"):
-            st.session_state.video_info = web_service.load_video_info(video_input)
+            st.session_state.video_info = web_service.load_video_info(
+                video_input,
+                cookies_from_browser=cookies_from_browser,
+            )
     except web_service.BilibiliError as error:
         st.error(f"解析失败：{error}")
     else:

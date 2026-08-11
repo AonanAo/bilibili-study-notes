@@ -9,6 +9,7 @@ from typing import Callable
 from bilibili import (
     BilibiliError,
     NoSubtitleError,
+    SubtitleLoginRequiredError,
     VideoCollection,
     VideoPart,
     get_video_parts,
@@ -68,9 +69,18 @@ class WebGenerationResult:
         return sum(part.error_type == "processing_failed" for part in self.parts)
 
 
-def load_video_info(video_input: str) -> VideoCollection:
+def load_video_info(
+    video_input: str,
+    *,
+    cookies_from_browser: str | None = None,
+) -> VideoCollection:
     """调用现有 B 站解析能力，返回视频及全部分 P 信息。"""
 
+    if cookies_from_browser is not None:
+        return get_video_parts(
+            video_input,
+            cookies_from_browser=cookies_from_browser,
+        )
     return get_video_parts(video_input)
 
 
@@ -87,6 +97,19 @@ def select_parts(
     """使用 ``selection.py`` 的统一规则选择网页要处理的分 P。"""
 
     return select_video_parts(video_info.parts, selection)
+
+
+def _web_error_message(error: str | None) -> str | None:
+    """把要求使用 CLI 参数的登录错误转换为网页操作提示。"""
+
+    if error is None:
+        return None
+    if "--cookies-from-browser" in error or "要求登录后才能读取" in error:
+        return (
+            "该视频字幕需要登录。请确认页面中的“B站登录浏览器”已选择"
+            "正确的已登录浏览器；必要时关闭该浏览器后重试。"
+        )
+    return error
 
 
 def _read_single_part_report(report: SinglePartReport) -> WebPartResult:
@@ -118,7 +141,7 @@ def _read_multi_part_result(result: PartProcessingResult) -> WebPartResult:
             page_number=result.page_number,
             title=result.title,
             error_type=result.error_type or "processing_failed",
-            error=result.error,
+            error=_web_error_message(result.error),
             filename=result.output_path.name if result.output_path else None,
         )
 
@@ -170,6 +193,7 @@ def generate_notes(
     selected_parts: tuple[VideoPart, ...],
     note_mode: str | None = None,
     extra_instruction: str | None = None,
+    cookies_from_browser: str | None = None,
     output_root: Path = OUTPUT_DIR,
     on_event: Callable[[str], None] | None = None,
 ) -> WebGenerationResult:
@@ -179,6 +203,7 @@ def generate_notes(
         "output_root": output_root,
         "note_mode": note_mode,
         "extra_instruction": extra_instruction,
+        "cookies_from_browser": cookies_from_browser,
         "on_event": on_event,
     }
     if video_info.is_multi_part:
@@ -201,6 +226,18 @@ def generate_notes(
                     title=error.video_title or part.title,
                     error_type="no_subtitle",
                     error=f"无字幕，无法生成笔记：{error}",
+                ),
+            ),
+        )
+    except SubtitleLoginRequiredError as error:
+        return WebGenerationResult(
+            is_multi_part=False,
+            parts=(
+                WebPartResult(
+                    page_number=part.page_number,
+                    title=getattr(error, "video_title", "") or part.title,
+                    error_type="processing_failed",
+                    error=_web_error_message(str(error)),
                 ),
             ),
         )

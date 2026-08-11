@@ -8,6 +8,7 @@ import web_service
 from bilibili import (
     BilibiliFetchError,
     NoSubtitleError,
+    SubtitleLoginRequiredError,
     VideoCollection,
     VideoPart,
     VideoSubtitle,
@@ -72,6 +73,31 @@ def test_load_video_info_preserves_single_part_collection(
     assert result.description == "课程简介"
     assert result.is_multi_part is False
     assert result.parts[0].page_number == 1
+
+
+def test_load_video_info_passes_selected_browser_to_existing_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = _collection(part_count=1)
+    received: dict[str, object] = {}
+
+    def fake_parser(value: str, **kwargs) -> VideoCollection:
+        received["value"] = value
+        received.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(web_service, "get_video_parts", fake_parser)
+
+    result = web_service.load_video_info(
+        "BV1DfrdByE2Hx",
+        cookies_from_browser="chrome",
+    )
+
+    assert result is expected
+    assert received == {
+        "value": "BV1DfrdByE2Hx",
+        "cookies_from_browser": "chrome",
+    }
 
 
 def test_load_video_info_preserves_multi_part_order(
@@ -161,6 +187,7 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
         selected_parts=collection.parts,
         note_mode="technical",
         extra_instruction="重点解释原理。",
+        cookies_from_browser="chrome",
         output_root=tmp_path,
         on_event=on_event,
     )
@@ -169,6 +196,7 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
     assert received["output_root"] == tmp_path
     assert received["note_mode"] == "technical"
     assert received["extra_instruction"] == "重点解释原理。"
+    assert received["cookies_from_browser"] == "chrome"
     assert received["on_event"] is on_event
     assert events == ["单P事件"]
     assert isinstance(result, web_service.WebGenerationResult)
@@ -218,6 +246,7 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
         selected_parts=selected_parts,
         note_mode="course",
         extra_instruction="关注关键观点。",
+        cookies_from_browser="firefox",
         output_root=tmp_path,
         on_event=on_event,
     )
@@ -227,6 +256,7 @@ def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
     assert received["output_root"] == tmp_path
     assert received["note_mode"] == "course"
     assert received["extra_instruction"] == "关注关键观点。"
+    assert received["cookies_from_browser"] == "firefox"
     assert received["on_event"] is on_event
     assert events == ["多P事件"]
     assert result.is_multi_part is True
@@ -286,6 +316,33 @@ def test_generate_notes_converts_single_part_processing_failure(
     assert result.parts[0].error == "模型生成失败"
 
 
+def test_generate_notes_converts_login_failure_to_web_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+
+    def fake_process(*_args, **_kwargs):
+        raise SubtitleLoginRequiredError(
+            "B 站要求登录后才能读取该视频字幕。"
+            "请使用 --cookies-from-browser 指定一个已登录 B 站的浏览器。"
+        )
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_process)
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        cookies_from_browser="chrome",
+        output_root=tmp_path,
+    )
+
+    part = result.parts[0]
+    assert part.error_type == "processing_failed"
+    assert "B站登录浏览器" in part.error
+    assert "--cookies-from-browser" not in part.error
+
+
 def test_generate_notes_converts_multi_part_statuses_and_summary_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -336,6 +393,42 @@ def test_generate_notes_converts_multi_part_statuses_and_summary_failure(
     assert result.parts[2].error_type == "processing_failed"
     assert result.summary_markdown is None
     assert result.summary_error == "课程总结生成失败"
+
+
+def test_generate_notes_converts_multi_part_login_failure_to_web_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=2)
+    report = MultiPartReport(
+        output_dir=tmp_path / collection.bvid,
+        parts=(
+            PartProcessingResult(
+                1,
+                "第一章",
+                error=(
+                    "B 站要求登录后才能读取该视频字幕。"
+                    "请使用 --cookies-from-browser 指定浏览器。"
+                ),
+                error_type="processing_failed",
+            ),
+        ),
+        summary_path=None,
+    )
+    monkeypatch.setattr(
+        web_service,
+        "process_multi_part_video",
+        lambda *_args, **_kwargs: report,
+    )
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        output_root=tmp_path,
+    )
+
+    assert "B站登录浏览器" in result.parts[0].error
+    assert "--cookies-from-browser" not in result.parts[0].error
 
 
 def test_generate_notes_isolates_markdown_read_failures(

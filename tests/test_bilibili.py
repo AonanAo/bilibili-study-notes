@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import io
+import json
+
 import pytest
 
 import bilibili
@@ -143,8 +146,25 @@ def test_get_video_parts_returns_single_part(monkeypatch: pytest.MonkeyPatch) ->
 def test_get_video_parts_parses_multi_part_playlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    FakeYoutubeDL.warning = None
-    FakeYoutubeDL.info = {
+    class MetadataYoutubeDL(FakeYoutubeDL):
+        metadata = {
+            "code": 0,
+            "data": {
+                "title": "接口课程标题",
+                "desc": "接口返回的课程简介",
+                "pages": [
+                    {"page": 1, "part": "变量"},
+                    {"page": 2, "part": "接口函数标题"},
+                    {"page": 3, "part": "类"},
+                ],
+            },
+        }
+
+        def urlopen(self, _url: str) -> io.StringIO:
+            return io.StringIO(json.dumps(self.metadata))
+
+    MetadataYoutubeDL.warning = None
+    MetadataYoutubeDL.info = {
         "_type": "playlist",
         "id": "BV1DfrdByE2Hx",
         "title": "Python 课程",
@@ -164,16 +184,50 @@ def test_get_video_parts_parses_multi_part_playlist(
             },
         ],
     }
-    monkeypatch.setattr(bilibili, "YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr(bilibili, "YoutubeDL", MetadataYoutubeDL)
 
     collection = bilibili.get_video_parts(
         "https://www.bilibili.com/video/BV1DfrdByE2Hx?p=2"
     )
 
     assert collection.is_multi_part is True
+    assert collection.title == "Python 课程"
+    assert collection.description == "接口返回的课程简介"
     assert [part.page_number for part in collection.parts] == [1, 2, 3]
-    assert [part.title for part in collection.parts] == ["第 1 分P", "函数", "第 3 分P"]
+    assert [part.title for part in collection.parts] == ["变量", "函数", "类"]
     assert collection.parts[2].url.endswith("?p=3")
+
+
+def test_get_video_parts_keeps_fallbacks_when_metadata_request_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingMetadataYoutubeDL(FakeYoutubeDL):
+        def urlopen(self, _url: str):
+            raise OSError("metadata unavailable")
+
+    FailingMetadataYoutubeDL.warning = None
+    FailingMetadataYoutubeDL.info = {
+        "_type": "playlist",
+        "id": "BV1DfrdByE2Hx",
+        "title": "Python 课程",
+        "entries": [
+            {
+                "_type": "url",
+                "url": "https://www.bilibili.com/video/BV1DfrdByE2Hx?p=1",
+            },
+            {
+                "_type": "url",
+                "url": "https://www.bilibili.com/video/BV1DfrdByE2Hx?p=2",
+                "title": "函数",
+            },
+        ],
+    }
+    monkeypatch.setattr(bilibili, "YoutubeDL", FailingMetadataYoutubeDL)
+
+    collection = bilibili.get_video_parts("BV1DfrdByE2Hx")
+
+    assert collection.description == ""
+    assert [part.title for part in collection.parts] == ["第 1 分P", "函数"]
 
 
 def test_fetch_reports_no_subtitle(monkeypatch: pytest.MonkeyPatch) -> None:
