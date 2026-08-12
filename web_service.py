@@ -23,7 +23,17 @@ from pipeline import (
     process_multi_part_video,
     process_single_part_video,
 )
-from prompt import NoteMode, get_selectable_note_modes
+from prompt import (
+    NoteMode,
+    NoteModeError,
+    NoteTemplate,
+    ResolvedNoteTemplate,
+    get_note_template_options,
+    get_all_note_template_options,
+    get_selectable_note_modes,
+    resolve_note_template,
+    NOTE_SECTION_LIBRARY,
+)
 from selection import PartSelectionError, select_video_parts
 from transcript import Transcript
 
@@ -62,6 +72,11 @@ class WebGenerationResult:
     segmented_markdown: str | None = None
     segmented_filename: str | None = None
     segmented_error: str | None = None
+    template: ResolvedNoteTemplate | None = None
+    secondary_markdown: str | None = None
+    secondary_filename: str | None = None
+    secondary_error: str | None = None
+    secondary_template: ResolvedNoteTemplate | None = None
 
     @property
     def succeeded_count(self) -> int:
@@ -97,6 +112,12 @@ def get_note_mode_options() -> tuple[NoteMode, ...]:
     return get_selectable_note_modes()
 
 
+def get_note_template_options_for_web() -> tuple[NoteTemplate, ...]:
+    """返回网页可配置的总体笔记预设。"""
+
+    return get_all_note_template_options()
+
+
 def select_parts(
     video_info: VideoCollection,
     selection: str | None,
@@ -112,13 +133,14 @@ def estimate_deepseek_calls(
     selected_parts: tuple[VideoPart, ...] | None = None,
     generate_collection_summary: bool = False,
     generate_segmented_notes: bool = False,
+    generate_secondary_notes: bool = False,
 ) -> int:
     """返回提交前应展示的最多 DeepSeek 逻辑调用次数。"""
 
     if video_info.is_multi_part:
         parts = selected_parts if selected_parts is not None else video_info.parts
         return len(parts) + int(generate_collection_summary)
-    return 3 if generate_segmented_notes else 1
+    return 1 + int(generate_secondary_notes) + (2 if generate_segmented_notes else 0)
 
 
 def _web_error_message(error: str | None) -> str | None:
@@ -175,6 +197,21 @@ def _read_segmented_report(
             f"读取已生成分段笔记失败：{error}",
         )
     return markdown, report.segmented_output_path.name, report.segmented_error
+
+
+def _read_secondary_report(
+    report: SinglePartReport,
+) -> tuple[str | None, str | None, str | None]:
+    if report.secondary_output_path is None:
+        return None, None, report.secondary_error
+    try:
+        return (
+            report.secondary_output_path.read_text(encoding="utf-8"),
+            report.secondary_output_path.name,
+            report.secondary_error,
+        )
+    except OSError as error:
+        return None, report.secondary_output_path.name, f"读取第二份总体笔记失败：{error}"
 
 
 def _read_multi_part_result(result: PartProcessingResult) -> WebPartResult:
@@ -245,6 +282,8 @@ def generate_notes(
     extra_instruction: str | None = None,
     generate_collection_summary: bool = False,
     generate_segmented_notes: bool = False,
+    note_template: ResolvedNoteTemplate | None = None,
+    secondary_note_template: ResolvedNoteTemplate | None = None,
     cookies_from_browser: str | None = None,
     output_root: Path = OUTPUT_DIR,
     on_event: Callable[[str], None] | None = None,
@@ -272,6 +311,8 @@ def generate_notes(
         report = process_single_part_video(
             video_info,
             generate_segmented_notes=generate_segmented_notes,
+            note_template=note_template,
+            secondary_note_template=secondary_note_template,
             **common_options,
         )
     except NoSubtitleError as error:
@@ -316,6 +357,7 @@ def generate_notes(
     segmented_markdown, segmented_filename, segmented_error = _read_segmented_report(
         report
     )
+    secondary_markdown, secondary_filename, secondary_error = _read_secondary_report(report)
     return WebGenerationResult(
         is_multi_part=False,
         parts=(_read_single_part_report(report),),
@@ -323,4 +365,9 @@ def generate_notes(
         segmented_markdown=segmented_markdown,
         segmented_filename=segmented_filename,
         segmented_error=segmented_error,
+        template=note_template,
+        secondary_markdown=secondary_markdown,
+        secondary_filename=secondary_filename,
+        secondary_error=secondary_error,
+        secondary_template=secondary_note_template,
     )

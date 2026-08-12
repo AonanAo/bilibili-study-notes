@@ -59,6 +59,10 @@ def _format_note_mode(mode: web_service.NoteMode | None) -> str:
     return f"{mode.name}（{mode.key}）"
 
 
+def _format_note_template(template: web_service.NoteTemplate) -> str:
+    return f"{template.name}（{template.key}）"
+
+
 def _format_browser(browser: str | None) -> str:
     """显示网页 Cookie 浏览器选择的中文标签。"""
 
@@ -116,6 +120,24 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
             else:
                 st.error(result.segmented_error or "分段笔记生成失败。")
                 st.caption("总体笔记已保留，仍可查看和下载。")
+        if part.succeeded and result.secondary_template is not None:
+            st.markdown("#### 第二份总体笔记")
+            if result.secondary_markdown is not None:
+                label = result.secondary_template.name
+                if result.secondary_template.customized:
+                    label += "（已自定义）"
+                st.success(f"{label}生成成功")
+                st.markdown(result.secondary_markdown)
+                st.download_button(
+                    "下载第二份总体笔记 Markdown",
+                    data=result.secondary_markdown,
+                    file_name=result.secondary_filename or "study_notes_B.md",
+                    mime="text/markdown",
+                    key="download_secondary_notes",
+                )
+            else:
+                st.error(result.secondary_error or "第二份总体笔记生成失败。")
+                st.caption("第一份总体笔记已保留，仍可查看和下载。")
         return
 
     st.write(
@@ -184,6 +206,10 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
         part_selection = None
         generate_collection_summary = False
         generate_segmented_notes = False
+        generate_secondary_notes = False
+        selected_template = None
+        secondary_template = None
+        secondary_section_keys = None
         if video_info.is_multi_part:
             part_selection = st.text_input(
                 "选择分P",
@@ -195,6 +221,58 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 value=False,
             )
         else:
+            templates = web_service.get_note_template_options_for_web()
+            template = st.selectbox(
+                "总体笔记预设",
+                options=templates,
+                format_func=_format_note_template,
+            )
+            default_template = web_service.resolve_note_template(template.key)
+            section_default = st.session_state.pop(
+                "summary_section_keys",
+                default_template.section_keys,
+            )
+            section_keys = st.multiselect(
+                "总体笔记章节（可增删）",
+                options=tuple(web_service.NOTE_SECTION_LIBRARY),
+                default=section_default,
+                format_func=lambda key: web_service.NOTE_SECTION_LIBRARY[key].title,
+                help="只能选择系统章节库中的章节；输出顺序按系统顺序排列。",
+            )
+            template_error = None
+            try:
+                selected_template = web_service.resolve_note_template(
+                    template.key,
+                    section_keys=section_keys,
+                )
+            except web_service.NoteModeError as error:
+                template_error = str(error)
+                st.error(template_error)
+            else:
+                if selected_template.customized:
+                    st.caption("当前章节配置：已自定义")
+            generate_secondary_notes = st.checkbox(
+                "同时生成第二份总体笔记",
+                value=False,
+                help="第二份笔记单独调用并保存为 _B 文件。",
+            )
+            if generate_secondary_notes:
+                secondary_choice = st.selectbox(
+                    "第二份总体笔记预设",
+                    options=templates,
+                    index=1 if template.key == templates[0].key else 0,
+                    format_func=_format_note_template,
+                )
+                secondary_default = web_service.resolve_note_template(secondary_choice.key)
+                secondary_section_keys = st.multiselect(
+                    "第二份总体笔记章节（可增删）",
+                    options=tuple(web_service.NOTE_SECTION_LIBRARY),
+                    default=secondary_default.section_keys,
+                    format_func=lambda key: web_service.NOTE_SECTION_LIBRARY[key].title,
+                    key="secondary_summary_sections",
+                )
+            else:
+                secondary_choice = None
             generate_segmented_notes = st.checkbox(
                 "生成按内容语义分段的笔记",
                 value=False,
@@ -219,18 +297,32 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
             except web_service.PartSelectionError:
                 estimate_available = False
         if estimate_available:
+            if not video_info.is_multi_part and template_error is None:
+                if generate_secondary_notes:
+                    secondary_template = web_service.resolve_note_template(
+                        secondary_choice.key,
+                        section_keys=secondary_section_keys,
+                    )
             estimated_calls = web_service.estimate_deepseek_calls(
                 video_info,
                 selected_parts=estimated_parts,
                 generate_collection_summary=generate_collection_summary,
                 generate_segmented_notes=generate_segmented_notes,
+                generate_secondary_notes=generate_secondary_notes,
             )
             st.info(f"预计最多调用 DeepSeek {estimated_calls} 次。")
         else:
             st.info("当前分P选择无效，修正后将显示预计调用次数。")
+        reset_submitted = st.form_submit_button("恢复模板默认设置") if not video_info.is_multi_part else False
         generate_submitted = st.form_submit_button("生成学习笔记", type="primary")
 
+    if reset_submitted:
+        st.session_state["summary_section_keys"] = default_template.section_keys
+        st.rerun()
     if generate_submitted:
+        if not video_info.is_multi_part and template_error is not None:
+            st.error("请至少保留一个总体笔记章节后再生成。")
+            return
         st.session_state.generation_result = None
         generation_status = st.status("正在准备生成学习笔记……", expanded=True)
 
@@ -247,6 +339,8 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 extra_instruction=extra_instruction.strip() or None,
                 generate_collection_summary=generate_collection_summary,
                 generate_segmented_notes=generate_segmented_notes,
+                note_template=selected_template,
+                secondary_note_template=secondary_template,
                 cookies_from_browser=st.session_state.cookies_from_browser,
                 on_event=show_event,
             )

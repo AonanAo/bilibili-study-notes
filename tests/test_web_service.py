@@ -15,6 +15,7 @@ from bilibili import (
 )
 from llm import LLMError
 from pipeline import MultiPartReport, PartProcessingResult, SinglePartReport
+from prompt import resolve_note_template
 from transcript import Transcript, TranscriptCue
 
 
@@ -186,6 +187,11 @@ def test_estimated_call_count_for_single_and_multi_part() -> None:
         )
         == 2
     )
+    assert web_service.estimate_deepseek_calls(
+        single,
+        generate_secondary_notes=True,
+        generate_segmented_notes=True,
+    ) == 4
 
 
 def test_generate_notes_dispatches_single_part_to_pipeline(
@@ -280,6 +286,40 @@ def test_generate_notes_passes_segment_switch_and_reads_only_reported_file(
     assert result.segmented_markdown == "# 本次分段笔记\n"
     assert result.segmented_filename == segmented_path.name
     assert result.segmented_error is None
+
+
+def test_generate_notes_reads_secondary_reported_file_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+    overall = tmp_path / "BV1DfrdByE2Hx_study_notes.md"
+    secondary = tmp_path / "BV1DfrdByE2Hx_study_notes_B.md"
+    overall.write_text("# 主总结\n", encoding="utf-8")
+    secondary.write_text("# 第二总结\n", encoding="utf-8")
+    video = VideoSubtitle(collection.bvid, "Python", "", _transcript("字幕"))
+    secondary_template = resolve_note_template("technical")
+    monkeypatch.setattr(
+        web_service,
+        "process_single_part_video",
+        lambda *_args, **_kwargs: SinglePartReport(
+            video,
+            overall,
+            secondary_output_path=secondary,
+            secondary_template=secondary_template,
+        ),
+    )
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        secondary_note_template=secondary_template,
+        output_root=tmp_path,
+    )
+
+    assert result.secondary_markdown == "# 第二总结\n"
+    assert result.secondary_filename == secondary.name
+    assert result.secondary_error is None
 
 
 def test_historical_segmented_file_is_not_read_after_current_failure(
