@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 import llm
-from prompt import build_course_summary_prompt, build_study_notes_prompt
+from prompt import build_course_summary_prompt, build_study_notes_prompt, resolve_note_template
 from segmentation import AssignedSegment, SegmentPlan, SemanticSegment
 from transcript import Transcript, TranscriptCue
 
@@ -397,6 +397,37 @@ def test_generate_notes_uses_selected_mode_and_dynamic_validation(
     assert expected_heading in call["messages"][1]["content"]
 
 
+def test_generate_notes_uses_final_custom_template_for_prompt_and_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = """# 视频主题
+Python
+
+## 核心知识点
+- 变量
+
+## 重要结论
+- 命名需要清晰。
+
+## 复习问题
+1. 什么是变量？
+"""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+
+    template = resolve_note_template(
+        "course",
+        section_keys=("core_knowledge", "important_conclusions", "review_questions"),
+    )
+    result = llm.generate_study_notes("课程字幕", note_template=template)
+
+    assert "## 重要结论" in result
+    prompt = FakeOpenAI.instances[0].chat.completions.calls[0]["messages"][1]["content"]
+    assert "## 总结" not in prompt
+    assert "## 重要结论" in prompt
+
+
 def test_generate_notes_rejects_headings_from_another_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -407,6 +438,19 @@ def test_generate_notes_rejects_headings_from_another_mode(
 
     with pytest.raises(llm.InvalidLLMResponseError, match="核心概念"):
         llm.generate_study_notes("字幕", mode="technical")
+
+
+def test_generate_notes_rejects_unconfigured_custom_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenAI.instances.clear()
+    FakeOpenAI.content = VALID_COURSE_NOTES
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "OpenAI", FakeOpenAI)
+    template = resolve_note_template("course", section_keys=("core_knowledge",))
+
+    with pytest.raises(llm.InvalidLLMResponseError, match="未配置的章节"):
+        llm.generate_study_notes("字幕", note_template=template)
 
 
 @pytest.mark.parametrize("mode", ["unknown", "academic"])

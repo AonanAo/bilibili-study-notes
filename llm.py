@@ -25,6 +25,8 @@ from prompt import (
     build_segment_plan_prompt,
     build_study_notes_prompt,
     get_note_mode,
+    ResolvedNoteTemplate,
+    resolve_note_template,
 )
 from segmentation import (
     AssignedSegment,
@@ -115,6 +117,16 @@ def _validate_markdown(markdown: str, required_headings: tuple[str, ...]) -> Non
     if missing:
         raise InvalidLLMResponseError(
             "DeepSeek 返回的 Markdown 缺少必要章节：" + "、".join(missing)
+        )
+    allowed_level_two = {
+        heading for heading in required_headings if heading.startswith("## ")
+    }
+    unexpected = sorted(
+        line for line in lines if line.startswith("## ") and line not in allowed_level_two
+    )
+    if unexpected:
+        raise InvalidLLMResponseError(
+            "DeepSeek 返回了未配置的章节：" + "、".join(unexpected)
         )
 
 
@@ -252,6 +264,7 @@ def generate_study_notes(
     video_description: str = "",
     mode: str | None = None,
     extra_instruction: str | None = None,
+    note_template: ResolvedNoteTemplate | None = None,
     model: str | None = None,
 ) -> str:
     """调用 DeepSeek，将字幕生成 Markdown 学习笔记。
@@ -266,7 +279,7 @@ def generate_study_notes(
         raise LLMError("额外学习要求必须是字符串或 None。")
 
     try:
-        note_mode = get_note_mode(mode)
+        resolved_template = note_template or resolve_note_template(mode)
     except NoteModeError as error:
         # 对外统一使用 LLMError 体系，便于命令行和 pipeline 处理。
         raise InvalidNoteModeError(str(error)) from error
@@ -275,13 +288,14 @@ def generate_study_notes(
         subtitle_text.strip(),
         video_title=video_title.strip(),
         video_description=video_description.strip(),
-        mode=note_mode.key,
+        mode=resolved_template.template_key,
         extra_instruction=(extra_instruction or "").strip(),
+        note_template=resolved_template,
     )
     return _request_markdown(
         system_prompt=STUDY_NOTES_SYSTEM_PROMPT,
         user_prompt=user_prompt,
-        required_headings=note_mode.required_headings,
+        required_headings=resolved_template.required_headings,
         model=model,
     )
 

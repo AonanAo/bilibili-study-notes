@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,82 @@ class NoteSection:
         """返回该章节必须使用的二级 Markdown 标题。"""
 
         return f"## {self.title}"
+
+
+@dataclass(frozen=True)
+class NoteTemplate:
+    """总体笔记预设；内置配置本身不可变。"""
+
+    key: str
+    name: str
+    description: str
+    default_section_keys: tuple[str, ...]
+    selectable: bool = True
+
+
+@dataclass(frozen=True)
+class ResolvedNoteTemplate:
+    """一次生成任务最终采用的章节配置。"""
+
+    template_key: str
+    name: str
+    description: str
+    section_keys: tuple[str, ...]
+    sections: tuple[NoteSection, ...]
+    customized: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.section_keys:
+            raise NoteModeError("总体笔记至少需要保留一个正文章节。")
+        if len(set(self.section_keys)) != len(self.section_keys):
+            raise NoteModeError("总体笔记章节不能重复。")
+        if len(self.sections) != len(self.section_keys):
+            raise NoteModeError("总体笔记章节配置无效。")
+
+    @property
+    def required_headings(self) -> tuple[str, ...]:
+        return ("# 视频主题", *(section.heading for section in self.sections))
+
+
+NOTE_SECTION_LIBRARY: dict[str, NoteSection] = {
+    "content_overview": NoteSection("内容概括", "概括本视频讲述的主要内容和学习目标。"),
+    "core_concepts": NoteSection(
+        "核心概念", "列出重要术语、组件或方法，说明定义、作用和重要程度。"
+    ),
+    "core_knowledge": NoteSection("核心知识点", "按重要程度整理课程中需要理解和记忆的知识。"),
+    "key_points": NoteSection("关键观点", "提炼讲者的重要判断、结论、建议和需要注意的条件。"),
+    "principles": NoteSection(
+        "原理解释", "说明关键机制、执行过程、前置条件和因果关系，必要时分步骤表达。"
+    ),
+    "examples": NoteSection("实践案例", "整理字幕中的代码思路、操作步骤或应用案例；没有案例时明确说明。"),
+    "common_questions": NoteSection("常见问题", "总结容易误解、容易出错的地方及对应解决思路。"),
+    "knowledge_links": NoteSection(
+        "知识关联", "说明各知识点之间及其与已有知识、现实场景的联系。字幕没有明说的内容必须标注为“延伸联系”。"
+    ),
+    "existing_knowledge": NoteSection(
+        "与已有知识关联", "说明视频内容与常见基础概念、实际场景或其他学科知识的联系。字幕没有明说的内容必须标注为“延伸联系”。"
+    ),
+    "important_conclusions": NoteSection("重要结论", "归纳视频中需要特别记住的结论、限制条件和适用范围。"),
+    "summary": NoteSection("总结", "归纳本视频最值得记住的内容和学习收获。"),
+    "review_questions": NoteSection("复习问题", "给出 5–8 个覆盖概念、原理和实际应用的自测问题。"),
+    "main_examples": NoteSection("主要例子", "整理视频中最能说明核心观点的代表性例子及其作用。"),
+}
+
+
+NOTE_TEMPLATES: dict[str, NoteTemplate] = {
+    "default": NoteTemplate(
+        "default", "默认学习笔记", "沿用 v0.1 的通用学习笔记结构。",
+        ("core_knowledge", "key_points", "existing_knowledge", "review_questions"), False,
+    ),
+    "technical": NoteTemplate(
+        "technical", "技术学习", "适用于 AI、编程和其他技术教程，强调原理与实践。",
+        ("core_concepts", "principles", "examples", "common_questions", "review_questions"),
+    ),
+    "course": NoteTemplate(
+        "course", "普通课程笔记", "适用于普通知识课程和公开课，强调内容脉络与主要结论。",
+        ("content_overview", "core_knowledge", "key_points", "knowledge_links", "summary"),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -160,6 +237,52 @@ def get_note_mode(mode: str | None = None) -> NoteMode:
     return note_mode
 
 
+def get_note_template_options() -> tuple[NoteTemplate, ...]:
+    """返回可在网页中选择的总体笔记预设。"""
+
+    return tuple(template for template in NOTE_TEMPLATES.values() if template.selectable)
+
+
+def get_all_note_template_options() -> tuple[NoteTemplate, ...]:
+    """返回包含兼容默认模板在内的全部总体笔记预设。"""
+
+    return tuple(NOTE_TEMPLATES.values())
+
+
+def resolve_note_template(
+    mode: str | None = None,
+    *,
+    template_key: str | None = None,
+    section_keys: Iterable[str] | None = None,
+) -> ResolvedNoteTemplate:
+    """解析预设和最终章节配置，保留旧 ``mode`` 调用兼容性。"""
+
+    selected_key = (template_key or mode or DEFAULT_NOTE_MODE).strip().lower()
+    template = NOTE_TEMPLATES.get(selected_key)
+    if template is None or not template.selectable and selected_key != DEFAULT_NOTE_MODE:
+        raise NoteModeError(f"不支持的笔记模板“{selected_key}”。")
+    keys = tuple(section_keys) if section_keys is not None else template.default_section_keys
+    if not keys:
+        raise NoteModeError("总体笔记至少需要保留一个正文章节。")
+    if len(set(keys)) != len(keys):
+        raise NoteModeError("总体笔记章节不能重复。")
+    unknown = [key for key in keys if key not in NOTE_SECTION_LIBRARY]
+    if unknown:
+        raise NoteModeError("存在未知的总体笔记章节：" + "、".join(unknown))
+    # 系统顺序优先于用户勾选顺序，保证输出结构稳定。
+    order = {key: index for index, key in enumerate(NOTE_SECTION_LIBRARY)}
+    normalized_keys = tuple(sorted(keys, key=order.__getitem__))
+    sections = tuple(NOTE_SECTION_LIBRARY[key] for key in normalized_keys)
+    return ResolvedNoteTemplate(
+        template_key=template.key,
+        name=template.name,
+        description=template.description,
+        section_keys=normalized_keys,
+        sections=sections,
+        customized=normalized_keys != template.default_section_keys,
+    )
+
+
 STUDY_NOTES_SYSTEM_PROMPT = """
 你是一位严谨的中文学习教练。你的任务是把视频字幕整理成便于理解、
 回顾和自我测试的学习笔记。
@@ -219,12 +342,15 @@ def build_study_notes_prompt(
     video_description: str = "",
     mode: str | None = None,
     extra_instruction: str | None = None,
+    note_template: ResolvedNoteTemplate | None = None,
 ) -> str:
     """根据笔记模式，把视频信息和字幕组装成用户提示词。"""
 
-    note_mode = get_note_mode(mode)
+    if note_template is not None and not isinstance(note_template, ResolvedNoteTemplate):
+        raise ValueError("总体笔记模板配置无效。")
+    resolved_template = note_template or resolve_note_template(mode)
     structure_text = "\n\n".join(
-        f"{section.heading}\n{section.instruction}" for section in note_mode.sections
+        f"{section.heading}\n{section.instruction}" for section in resolved_template.sections
     )
 
     if extra_instruction is not None and not isinstance(extra_instruction, str):
@@ -242,7 +368,7 @@ def build_study_notes_prompt(
 请将下面的视频字幕整理成一份中文学习笔记。
 
 【笔记模式】
-{note_mode.name}：{note_mode.description}
+{resolved_template.name}：{resolved_template.description}
 
 请严格使用以下 Markdown 结构，所有标题都不能省略：
 

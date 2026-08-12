@@ -4,14 +4,49 @@ import pytest
 
 from prompt import (
     DEFAULT_NOTE_MODE,
+    NOTE_SECTION_LIBRARY,
     NOTE_MODES,
+    get_note_template_options,
     NoteModeError,
     build_segment_content_prompt,
     build_segment_plan_prompt,
     build_study_notes_prompt,
     get_note_mode,
+    resolve_note_template,
     get_selectable_note_modes,
 )
+
+
+def test_resolved_template_can_remove_and_add_fixed_sections() -> None:
+    resolved = resolve_note_template(
+        "course",
+        section_keys=("content_overview", "review_questions", "important_conclusions"),
+    )
+
+    assert resolved.customized is True
+    assert resolved.section_keys == (
+        "content_overview",
+        "important_conclusions",
+        "review_questions",
+    )
+    prompt = build_study_notes_prompt("字幕", note_template=resolved)
+    assert "## 重要结论" in prompt
+    assert "## 复习问题" in prompt
+    assert "## 总结\n" not in prompt
+
+
+def test_resolved_template_rejects_empty_duplicate_or_unknown_sections() -> None:
+    with pytest.raises(NoteModeError, match="至少需要"):
+        resolve_note_template("course", section_keys=())
+    with pytest.raises(NoteModeError, match="不能重复"):
+        resolve_note_template("course", section_keys=("summary", "summary"))
+    with pytest.raises(NoteModeError, match="未知"):
+        resolve_note_template("course", section_keys=("missing",))
+
+
+def test_template_options_are_selectable_and_library_is_stable() -> None:
+    assert [template.key for template in get_note_template_options()] == ["technical", "course"]
+    assert NOTE_SECTION_LIBRARY["summary"].title == "总结"
 
 
 def test_default_mode_preserves_v01_headings() -> None:
