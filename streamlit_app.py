@@ -210,6 +210,7 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
         selected_template = None
         secondary_template = None
         secondary_section_keys = None
+        secondary_template_error = None
         if video_info.is_multi_part:
             part_selection = st.text_input(
                 "选择分P",
@@ -274,6 +275,17 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                     key="secondary_summary_sections",
                     format_func=lambda key: web_service.NOTE_SECTION_LIBRARY[key].title,
                 )
+                try:
+                    secondary_template = web_service.resolve_note_template(
+                        secondary_choice.key,
+                        section_keys=secondary_section_keys,
+                    )
+                except web_service.NoteModeError as error:
+                    secondary_template_error = str(error)
+                    st.error(f"第二份总体笔记：{secondary_template_error}")
+                else:
+                    if secondary_template.customized:
+                        st.caption("第二份总体笔记章节配置：已自定义")
             else:
                 secondary_choice = None
             generate_segmented_notes = st.checkbox(
@@ -303,12 +315,6 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
             except web_service.PartSelectionError:
                 estimate_available = False
         if estimate_available:
-            if not video_info.is_multi_part and template_error is None:
-                if generate_secondary_notes:
-                    secondary_template = web_service.resolve_note_template(
-                        secondary_choice.key,
-                        section_keys=secondary_section_keys,
-                    )
             estimated_calls = web_service.estimate_deepseek_calls(
                 video_info,
                 selected_parts=estimated_parts,
@@ -326,7 +332,10 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
         st.session_state["summary_section_keys"] = default_template.section_keys
         st.rerun()
     if generate_submitted:
-        if not video_info.is_multi_part and template_error is not None:
+        if (
+            not video_info.is_multi_part
+            and (template_error is not None or secondary_template_error is not None)
+        ):
             st.error("请至少保留一个总体笔记章节后再生成。")
             return
         st.session_state.generation_result = None
