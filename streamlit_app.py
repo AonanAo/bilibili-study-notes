@@ -228,14 +228,13 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 format_func=_format_note_template,
             )
             default_template = web_service.resolve_note_template(template.key)
-            section_default = st.session_state.pop(
-                "summary_section_keys",
-                default_template.section_keys,
-            )
+            if st.session_state.get("summary_template_key") != template.key:
+                st.session_state["summary_section_keys"] = default_template.section_keys
+                st.session_state["summary_template_key"] = template.key
             section_keys = st.multiselect(
                 "总体笔记章节（可增删）",
                 options=tuple(web_service.NOTE_SECTION_LIBRARY),
-                default=section_default,
+                key="summary_section_keys",
                 format_func=lambda key: web_service.NOTE_SECTION_LIBRARY[key].title,
                 help="只能选择系统章节库中的章节；输出顺序按系统顺序排列。",
             )
@@ -264,12 +263,16 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                     format_func=_format_note_template,
                 )
                 secondary_default = web_service.resolve_note_template(secondary_choice.key)
+                if st.session_state.get("secondary_template_key") != secondary_choice.key:
+                    st.session_state["secondary_summary_sections"] = (
+                        secondary_default.section_keys
+                    )
+                    st.session_state["secondary_template_key"] = secondary_choice.key
                 secondary_section_keys = st.multiselect(
                     "第二份总体笔记章节（可增删）",
                     options=tuple(web_service.NOTE_SECTION_LIBRARY),
-                    default=secondary_default.section_keys,
-                    format_func=lambda key: web_service.NOTE_SECTION_LIBRARY[key].title,
                     key="secondary_summary_sections",
+                    format_func=lambda key: web_service.NOTE_SECTION_LIBRARY[key].title,
                 )
             else:
                 secondary_choice = None
