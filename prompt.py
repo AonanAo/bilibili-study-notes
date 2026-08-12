@@ -272,7 +272,16 @@ def resolve_note_template(
     # 系统顺序优先于用户勾选顺序，保证输出结构稳定。
     order = {key: index for index, key in enumerate(NOTE_SECTION_LIBRARY)}
     normalized_keys = tuple(sorted(keys, key=order.__getitem__))
-    sections = tuple(NOTE_SECTION_LIBRARY[key] for key in normalized_keys)
+    if selected_key == DEFAULT_NOTE_MODE and section_keys is None:
+        # CLI 未传新配置时，严格沿用 v0.1 的章节说明和顺序。
+        legacy_mode = NOTE_MODES[DEFAULT_NOTE_MODE]
+        sections = legacy_mode.sections
+        normalized_keys = tuple(
+            key
+            for key in template.default_section_keys
+        )
+    else:
+        sections = tuple(NOTE_SECTION_LIBRARY[key] for key in normalized_keys)
     return ResolvedNoteTemplate(
         template_key=template.key,
         name=template.name,

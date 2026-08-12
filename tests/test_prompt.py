@@ -62,6 +62,15 @@ def test_default_mode_preserves_v01_headings() -> None:
     )
 
 
+def test_default_template_preserves_legacy_section_instructions() -> None:
+    legacy = get_note_mode()
+    resolved = resolve_note_template()
+
+    assert tuple(section.instruction for section in resolved.sections) == tuple(
+        section.instruction for section in legacy.sections
+    )
+
+
 @pytest.mark.parametrize(
     ("mode", "headings"),
     [
