@@ -215,6 +215,30 @@ def test_short_boundary_cue_outside_plan_is_tolerated() -> None:
     assert [cue.text for cue in assigned[0].transcript.cues] == ["正常内容"]
 
 
+@pytest.mark.parametrize(
+    ("segments", "message"),
+    [
+        (
+            (SemanticSegment("首段被截断", 0.5, 2.0),),
+            "字幕起点",
+        ),
+        (
+            (SemanticSegment("末段被截断", 0.0, 4.5),),
+            "字幕结尾",
+        ),
+    ],
+)
+def test_partial_overlap_at_transcript_edges_is_rejected(
+    segments: tuple[SemanticSegment, ...],
+    message: str,
+) -> None:
+    with pytest.raises(SegmentationError, match=message):
+        assign_cues_to_segments(
+            _transcript(TranscriptCue(0.0, 5.0, "完整字幕")),
+            SegmentPlan(segments),
+        )
+
+
 def test_long_effective_cue_omission_is_rejected() -> None:
     with pytest.raises(SegmentationError, match="超出容差"):
         assign_cues_to_segments(

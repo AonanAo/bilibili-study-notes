@@ -207,6 +207,37 @@ def _covered_seconds(cues: list[TranscriptCue]) -> float:
     return total + current_end - current_start
 
 
+def _validate_transcript_edge_coverage(
+    transcript: Transcript,
+    plan: SegmentPlan,
+) -> None:
+    """拒绝把首尾有效 cue 从分段范围中间截断。"""
+
+    first_cue = transcript.cues[0]
+    first_segment = plan.segments[0]
+    if (
+        first_segment.start_seconds > first_cue.start_seconds
+        and first_cue.end_seconds > first_segment.start_seconds
+    ):
+        raise SegmentationError(
+            "分段方案未完整覆盖字幕起点：首段开始时间 "
+            f"{first_segment.start_seconds:.3f} 秒位于首条字幕 "
+            f"{first_cue.start_seconds:.3f}–{first_cue.end_seconds:.3f} 秒内部。"
+        )
+
+    last_cue = transcript.cues[-1]
+    last_segment = plan.segments[-1]
+    if (
+        last_segment.end_seconds < last_cue.end_seconds
+        and last_cue.start_seconds < last_segment.end_seconds
+    ):
+        raise SegmentationError(
+            "分段方案未完整覆盖字幕结尾：末段结束时间 "
+            f"{last_segment.end_seconds:.3f} 秒位于末条字幕 "
+            f"{last_cue.start_seconds:.3f}–{last_cue.end_seconds:.3f} 秒内部。"
+        )
+
+
 def assign_cues_to_segments(
     transcript: Transcript,
     plan: SegmentPlan,
@@ -219,6 +250,8 @@ def assign_cues_to_segments(
 
     if not transcript.cues:
         raise SegmentationError("字幕没有有效 cue，无法生成分段笔记。")
+
+    _validate_transcript_edge_coverage(transcript, plan)
 
     assignments: list[int | None] = []
     internal_gap_positions: dict[int, list[int]] = {}
