@@ -23,6 +23,7 @@ from llm import (
     generate_segment_plan,
     generate_study_notes,
 )
+from prompt import ResolvedNoteTemplate, resolve_note_template
 from segmentation import (
     SegmentNoteContent,
     SegmentPlan,
@@ -63,6 +64,9 @@ class SinglePartReport:
     segmented_notes_requested: bool = False
     segmented_output_path: Path | None = None
     segmented_error: str | None = None
+    secondary_output_path: Path | None = None
+    secondary_template: ResolvedNoteTemplate | None = None
+    secondary_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,21 @@ def save_single_part_notes(
     return output_path
 
 
+def save_secondary_notes(
+    markdown: str,
+    *,
+    output_root: Path,
+    bvid: str,
+    suffix: str = "B",
+) -> Path:
+    """保存第二份总体笔记，避免覆盖主笔记。"""
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    output_path = output_root / f"{bvid}_study_notes_{suffix}.md"
+    output_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
+    return output_path
+
+
 def save_segmented_notes(
     markdown: str,
     *,
@@ -173,6 +192,8 @@ def process_single_part_video(
     *,
     output_root: Path,
     note_mode: str | None = None,
+    note_template: ResolvedNoteTemplate | None = None,
+    secondary_note_template: ResolvedNoteTemplate | None = None,
     extra_instruction: str | None = None,
     generate_segmented_notes: bool = False,
     cookies_from_browser: str | None = None,
@@ -215,6 +236,8 @@ def process_single_part_video(
     if extra_instruction is not None:
         note_options["extra_instruction"] = extra_instruction
 
+    if note_template is not None:
+        note_options["note_template"] = note_template
     markdown = generate_notes(video.subtitle_text, **note_options)
     output_path = save_single_part_notes(
         markdown,
@@ -223,8 +246,36 @@ def process_single_part_video(
     )
     emit(f"学习笔记已保存：{output_path.name}")
 
+    secondary_output_path: Path | None = None
+    secondary_error: str | None = None
+    if secondary_note_template is not None:
+        try:
+            emit("正在调用 DeepSeek 生成第二份总体笔记……")
+            secondary_markdown = generate_notes(
+                video.subtitle_text,
+                video_title=video.title,
+                video_description=video.description,
+                extra_instruction=extra_instruction,
+                note_template=secondary_note_template,
+            )
+            secondary_output_path = save_secondary_notes(
+                secondary_markdown,
+                output_root=output_root,
+                bvid=collection.bvid,
+            )
+            emit(f"第二份总体笔记已保存：{secondary_output_path.name}")
+        except (LLMError, OSError) as error:
+            secondary_error = f"第二份总体笔记生成失败，第一份已保留：{error}"
+            emit(secondary_error)
+
     if not generate_segmented_notes:
-        return SinglePartReport(video=video, output_path=output_path)
+        return SinglePartReport(
+            video=video,
+            output_path=output_path,
+            secondary_output_path=secondary_output_path,
+            secondary_template=secondary_note_template,
+            secondary_error=secondary_error,
+        )
 
     try:
         emit("正在调用 DeepSeek 规划语义分段……")
@@ -261,6 +312,9 @@ def process_single_part_video(
             output_path=output_path,
             segmented_notes_requested=True,
             segmented_error=message,
+            secondary_output_path=secondary_output_path,
+            secondary_template=secondary_note_template,
+            secondary_error=secondary_error,
         )
 
     emit(f"分段笔记已保存：{segmented_output_path.name}")
@@ -269,6 +323,9 @@ def process_single_part_video(
         output_path=output_path,
         segmented_notes_requested=True,
         segmented_output_path=segmented_output_path,
+        secondary_output_path=secondary_output_path,
+        secondary_template=secondary_note_template,
+        secondary_error=secondary_error,
     )
 
 

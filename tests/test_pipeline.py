@@ -6,6 +6,7 @@ import pytest
 
 from bilibili import NoSubtitleError, VideoCollection, VideoPart, VideoSubtitle
 from llm import LLMError
+from prompt import resolve_note_template
 from pipeline import (
     process_multi_part_video,
     process_single_part_video,
@@ -210,6 +211,69 @@ def test_single_part_segmented_flow_uses_three_calls_in_order(
     assert "## 1. 变量" in segmented
     assert "## 2. 函数" in segmented
     assert segmented.count("### 总结重点") == 2
+
+
+def test_single_part_supports_two_independent_overall_notes(
+    tmp_path: Path,
+) -> None:
+    collection = VideoCollection(
+        "BV1DfrdByE2Hx", "Python", "", (VideoPart(1, "Python", "https://example.test"),)
+    )
+    video = VideoSubtitle(collection.bvid, "Python", "", _transcript("字幕"))
+    calls: list[str] = []
+    primary = resolve_note_template("course", section_keys=("core_knowledge",))
+    secondary = resolve_note_template("technical", section_keys=("principles",))
+
+    def fake_notes(_text: str, **kwargs: object) -> str:
+        calls.append(kwargs["note_template"].template_key)
+        return f"# {kwargs['note_template'].name}\n\n## {kwargs['note_template'].sections[0].title}\n正文"
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        note_template=primary,
+        secondary_note_template=secondary,
+        subtitle_fetcher=lambda *_args, **_kwargs: video,
+        notes_generator=fake_notes,
+    )
+
+    assert calls == ["course", "technical"]
+    assert report.output_path.name == "BV1DfrdByE2Hx_study_notes.md"
+    assert report.secondary_output_path is not None
+    assert report.secondary_output_path.name == "BV1DfrdByE2Hx_study_notes_B.md"
+    assert report.secondary_error is None
+
+
+def test_secondary_overall_failure_preserves_primary_note(
+    tmp_path: Path,
+) -> None:
+    collection = VideoCollection(
+        "BV1DfrdByE2Hx", "Python", "", (VideoPart(1, "Python", "https://example.test"),)
+    )
+    video = VideoSubtitle(collection.bvid, "Python", "", _transcript("字幕"))
+    calls = 0
+    primary = resolve_note_template("course")
+    secondary = resolve_note_template("technical")
+
+    def fake_notes(_text: str, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise LLMError("第二份失败")
+        return "# 主总结\n\n## 内容概括\n正文"
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        note_template=primary,
+        secondary_note_template=secondary,
+        subtitle_fetcher=lambda *_args, **_kwargs: video,
+        notes_generator=fake_notes,
+    )
+
+    assert report.output_path.exists()
+    assert report.secondary_output_path is None
+    assert "第二份失败" in (report.secondary_error or "")
 
 
 @pytest.mark.parametrize("failure_stage", ["plan", "contents"])
