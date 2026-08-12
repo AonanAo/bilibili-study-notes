@@ -276,6 +276,49 @@ def test_secondary_overall_failure_preserves_primary_note(
     assert "第二份失败" in (report.secondary_error or "")
 
 
+def test_two_overall_notes_and_segmented_notes_run_in_four_call_order(
+    tmp_path: Path,
+) -> None:
+    collection = VideoCollection(
+        "BV1DfrdByE2Hx", "Python", "", (VideoPart(1, "Python", "https://example.test"),)
+    )
+    transcript = Transcript(
+        "bilibili", "zh-CN", (TranscriptCue(0.0, 1.0, "字幕"),)
+    )
+    video = VideoSubtitle(collection.bvid, "Python", "", transcript)
+    calls: list[str] = []
+    primary = resolve_note_template("course")
+    secondary = resolve_note_template("technical")
+
+    def fake_notes(_text: str, **kwargs: object) -> str:
+        calls.append(kwargs["note_template"].template_key)
+        return "# 笔记\n\n## 核心知识点\n正文"
+
+    def fake_plan(*_args: object, **_kwargs: object) -> SegmentPlan:
+        calls.append("plan")
+        return SegmentPlan((SemanticSegment("段", 0.0, 1.0),))
+
+    def fake_contents(*_args: object, **_kwargs: object):
+        calls.append("contents")
+        return (SegmentNoteContent("正文", ("重点",)),)
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        note_template=primary,
+        secondary_note_template=secondary,
+        generate_segmented_notes=True,
+        subtitle_fetcher=lambda *_args, **_kwargs: video,
+        notes_generator=fake_notes,
+        segment_planner=fake_plan,
+        segment_notes_generator=fake_contents,
+    )
+
+    assert calls == ["course", "technical", "plan", "contents"]
+    assert report.secondary_output_path is not None
+    assert report.segmented_output_path is not None
+
+
 @pytest.mark.parametrize("failure_stage", ["plan", "contents"])
 def test_segment_failure_preserves_overall_and_writes_no_pseudo_complete_file(
     tmp_path: Path,

@@ -279,11 +279,14 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 help="总体笔记仍会生成；另用一次调用规划分段、一次调用生成全部分段内容。",
             )
 
-        note_mode = st.selectbox(
-            "笔记模式",
-            options=(None, *web_service.get_note_mode_options()),
-            format_func=_format_note_mode,
-        )
+        if video_info.is_multi_part:
+            note_mode = st.selectbox(
+                "笔记模式",
+                options=(None, *web_service.get_note_mode_options()),
+                format_func=_format_note_mode,
+            )
+        else:
+            note_mode = None
         extra_instruction = st.text_area(
             "额外学习要求（可选）",
             placeholder="例如：请重点解释代码实现和设计原因。",
