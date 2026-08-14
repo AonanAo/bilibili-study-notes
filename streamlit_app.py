@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 import re
 
 import streamlit as st
@@ -86,6 +87,26 @@ def _format_browser(browser: str | None) -> str:
     """显示网页 Cookie 浏览器选择的中文标签。"""
 
     return BROWSER_LABELS[browser]
+
+
+def _sync_template_section_state(
+    state: MutableMapping[str, object],
+    *,
+    template_key: str,
+    default_section_keys: tuple[str, ...],
+    section_state_key: str,
+    template_state_key: str,
+    force_reset: bool = False,
+) -> None:
+    """在控件重建或模板变化时恢复章节默认值。"""
+
+    if (
+        force_reset
+        or state.get(template_state_key) != template_key
+        or section_state_key not in state
+    ):
+        state[section_state_key] = default_section_keys
+        state[template_state_key] = template_key
 
 
 def _render_download_button(
@@ -281,12 +302,12 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
     for part in failed_parts:
         st.error(f"P{part.page_number} {part.title}：{part.error}")
 
-    if not result.viewer_contents:
-        st.markdown("#### 合集总结")
-        if not result.collection_summary_requested:
-            st.info("本次已按设置跳过合集总结")
-        elif result.summary_markdown is not None:
-            st.success("summary.md 生成成功")
+    st.markdown("#### 合集总结")
+    if not result.collection_summary_requested:
+        st.info("本次已按设置跳过合集总结")
+    elif result.summary_markdown is not None:
+        st.success("summary.md 生成成功")
+        if not result.viewer_contents:
             st.markdown(result.summary_markdown)
             st.download_button(
                 "下载 summary.md",
@@ -295,12 +316,12 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
                 mime="text/markdown",
                 key="download_summary",
             )
-        elif result.summary_error is not None:
-            st.error(f"summary.md 生成失败或无法读取：{result.summary_error}")
-            if successful_parts:
-                st.caption("成功生成的分P笔记已保留，仍可查看和下载。")
-        else:
-            st.caption("本次没有生成合集总结。")
+    elif result.summary_error is not None:
+        st.error(f"summary.md 生成失败或无法读取：{result.summary_error}")
+        if successful_parts:
+            st.caption("成功生成的分P笔记已保留，仍可查看和下载。")
+    else:
+        st.caption("本次没有生成合集总结。")
 
 
 def render_generation_form(video_info: web_service.VideoCollection) -> None:
@@ -352,11 +373,14 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
             reset_template_requested = st.session_state.pop(
                 "_reset_summary_template", False
             )
-            if reset_template_requested or st.session_state.get(
-                "summary_template_key"
-            ) != template.key:
-                st.session_state["summary_section_keys"] = default_template.section_keys
-                st.session_state["summary_template_key"] = template.key
+            _sync_template_section_state(
+                st.session_state,
+                template_key=template.key,
+                default_section_keys=default_template.section_keys,
+                section_state_key="summary_section_keys",
+                template_state_key="summary_template_key",
+                force_reset=reset_template_requested,
+            )
             section_keys = st.multiselect(
                 "总体笔记章节（可增删）",
                 options=tuple(web_service.NOTE_SECTION_LIBRARY),
@@ -390,13 +414,13 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 secondary_default = web_service.resolve_note_template(
                     secondary_choice.key
                 )
-                if st.session_state.get(
-                    "secondary_template_key"
-                ) != secondary_choice.key:
-                    st.session_state["secondary_summary_sections"] = (
-                        secondary_default.section_keys
-                    )
-                    st.session_state["secondary_template_key"] = secondary_choice.key
+                _sync_template_section_state(
+                    st.session_state,
+                    template_key=secondary_choice.key,
+                    default_section_keys=secondary_default.section_keys,
+                    section_state_key="secondary_summary_sections",
+                    template_state_key="secondary_template_key",
+                )
                 secondary_section_keys = st.multiselect(
                     "第二份总体笔记章节（可增删）",
                     options=tuple(web_service.NOTE_SECTION_LIBRARY),

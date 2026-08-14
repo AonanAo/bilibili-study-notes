@@ -10,24 +10,22 @@
 ```text
 .
 ├── bilibili.py          # 独立字幕获取模块
+├── transcript.py        # 带时间轴字幕数据及 TXT/SRT 转换
 ├── llm.py               # DeepSeek API 调用模块
 ├── prompt.py            # 笔记模式、分 P 笔记和课程总结提示词
 ├── selection.py         # 分 P 选择表达式解析与校验
+├── segmentation.py      # 语义分段校验、字幕分配和分段笔记渲染
 ├── pipeline.py          # 单 P、多 P、文件保存和合集总结流程
+├── note_viewer.py       # 统一查看器的数据模型和选择规则
+├── mindmap.py           # 从 Markdown 提取并渲染思维导图
 ├── main.py              # 命令行入口
 ├── web_service.py       # 网页参数、生成流程和展示结果适配层
 ├── streamlit_app.py     # Streamlit 网页入口
 ├── outputs/             # 生成的 Markdown 学习笔记
+├── docs/                # 版本验收与实际开发记录
 ├── requirements.txt     # 运行依赖
 ├── requirements-dev.txt # 测试依赖
-└── tests/
-    ├── test_bilibili.py
-    ├── test_llm.py
-    ├── test_prompt.py
-    ├── test_selection.py
-    ├── test_main.py
-    ├── test_pipeline.py
-    └── test_web_service.py
+└── tests/               # 核心流程、CLI、Web、查看器和思维导图测试
 ```
 
 ## 环境要求
@@ -138,13 +136,13 @@ streamlit run streamlit_app.py
 - 字幕获取、模型调用或文件处理失败的分 P
 - `summary.md` 生成或读取失败
 
-单 P 和多 P 的输出位置与命令行完全一致。单 P 保存为：
+普通单 P 视频在网页和命令行中都保存为：
 
 ```text
 outputs/BV号_study_notes.md
 ```
 
-多 P 保存到独立的 BV 目录，成功的分 P 和课程总结都可以在网页中查看和下载。
+合集选择两个或更多 P 时，网页与命令行都沿用批量输出目录：成功的分 P 和课程总结保存在独立的 BV 目录中，并可以在网页查看和下载。网页中从合集只选择一个 P 时是一个明确例外：它进入完整单 P 模式，文件直接保存在 `outputs/`，而 CLI 的 `--parts 3` 仍保持原批量逐 P 行为。
 
 网页中从多 P 合集只选择一个 P 时，会改走完整单 P 流程。为避免先后选择不同分 P 时覆盖文件，所有下载文件都包含分 P 编号，例如：
 
@@ -248,11 +246,19 @@ outputs/
 
 网页只展示本次选择产生的处理报告，不会扫描并混入输出目录中的历史文件。如果课程总结失败，已经成功生成的分 P 笔记仍会保留，并可继续查看和下载。
 
-### v0.2.4.5 已知妥协
+### v0.2.4.6 回归收尾
+
+- 修复多 P 查看器已有内容时，合集总结的“已跳过”或“生成/读取失败”状态被隐藏的问题。
+- 修复在单 P 与多 P 表单之间切换后，模板章节控件被 Streamlit 移除、重新进入完整单 P 模式时章节为空的问题。
+- 增加合集连续单选 P03、P04 的磁盘文件和下载文件名防覆盖回归测试。
+- 完整离线测试结果为 `183 passed`；实际 UI 验收使用固定字幕和假生成结果，没有调用 DeepSeek。完整记录见 [v0.2.4.6 验收记录](docs/v0.2.4.6-acceptance.md)。
+
+### v0.2.4.5–v0.2.4.6 已知妥协
 
 - 思维导图直接从已生成 Markdown 的标题和列表提取层级，不会额外调用 DeepSeek。它适合快速浏览结构，但遇到标题层级不规整、正文信息多而列表少的笔记时，导图可能较粗略；本版本不继续优化导图质量。
 - 多 P 中只选择一个 P 时可以生成 A/B/分段等一套完整笔记；选择两个或更多 P 时只保留原有批量逐 P 模式，不批量生成多套模板笔记。
 - 字幕来源仍限于 B 站提供的字幕，本版本不提供 ASR 转写兜底。
+- 批量多 P 查看器的字幕下载名仍为 `P2_transcript.txt` / `P2_transcript.srt`，未增加 BV 号或两位 P 号；v0.2.4.6 只记录该问题，不调整既有命名。
 
 ### 字幕需要登录时
 
@@ -328,6 +334,8 @@ pytest -q
 
 单元测试不访问 B 站，不会消耗网络流量。
 
+v0.2.4.6 完整离线回归结果为 `183 passed`。测试通过固定数据和替身覆盖模型调用，不需要也不会调用 DeepSeek。
+
 ## 当前范围
 
 - 支持 `https://www.bilibili.com/video/BV...` 形式的链接、带查询参数的链接和直接 BV 号。
@@ -335,7 +343,7 @@ pytest -q
 - 同一 BV 号下的多 P 视频默认自动处理全部分 P，也可以用 `--parts` 选择部分分 P；输入链接中的 `?p=` 不会代替 `--parts`。
 - 支持 `technical` 和 `course` 两种可选笔记模式；不指定时沿用 v0.1 默认模板。
 - `course` 只控制单P笔记结构，`summary.md` 仍使用独立、固定的合集总结流程。
-- Streamlit 页面支持生成状态显示、Markdown 在线查看和单文件下载。
+- Streamlit 页面支持生成状态显示、单篇/双篇查看、Markdown/思维导图切换，以及 Markdown、TXT、SRT 单文件下载。
 - 多语言字幕优先返回简体中文，否则返回第一个可用语言。
 - 弹幕不当作字幕。
 - 只处理同一 BV 号内的分 P，不扩展为 UP 主播放列表或其他视频合集。

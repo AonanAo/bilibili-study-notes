@@ -521,6 +521,72 @@ def test_generate_notes_dispatches_one_selected_part_to_full_single_pipeline(
     )
 
 
+def test_collection_single_selection_download_names_do_not_overlap_across_parts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=4)
+    transcript = _transcript("字幕")
+    primary_template = resolve_note_template("course")
+    secondary_template = resolve_note_template("technical")
+
+    def fake_single(video_info, **kwargs):
+        page_number = kwargs["output_page_number"]
+        prefix = f"{collection.bvid}_P{page_number:02d}"
+        overall = tmp_path / f"{prefix}_study_notes.md"
+        secondary = tmp_path / f"{prefix}_study_notes_B.md"
+        segmented = tmp_path / f"{prefix}_segmented_notes.md"
+        overall.write_text(f"# P{page_number} 总体 A\n", encoding="utf-8")
+        secondary.write_text(f"# P{page_number} 总体 B\n", encoding="utf-8")
+        segmented.write_text(f"# P{page_number} 分段\n", encoding="utf-8")
+        return SinglePartReport(
+            VideoSubtitle(
+                collection.bvid,
+                video_info.parts[0].title,
+                "",
+                transcript,
+            ),
+            overall,
+            segmented_notes_requested=True,
+            segmented_output_path=segmented,
+            secondary_output_path=secondary,
+            secondary_template=secondary_template,
+        )
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_single)
+    filename_sets: list[set[str]] = []
+    for selected_part in (collection.parts[2], collection.parts[3]):
+        result = web_service.generate_notes(
+            collection,
+            selected_parts=(selected_part,),
+            note_template=primary_template,
+            secondary_note_template=secondary_template,
+            generate_segmented_notes=True,
+            output_root=tmp_path,
+        )
+        filenames = {content.filename for content in result.viewer_contents}
+        transcript_content = result.viewer_contents[-1]
+        assert transcript_content.srt_filename is not None
+        filenames.add(transcript_content.srt_filename)
+        filename_sets.append(filenames)
+
+    assert filename_sets[0] == {
+        "BV1DfrdByE2Hx_P03_study_notes.md",
+        "BV1DfrdByE2Hx_P03_study_notes_B.md",
+        "BV1DfrdByE2Hx_P03_segmented_notes.md",
+        "BV1DfrdByE2Hx_P03_transcript.txt",
+        "BV1DfrdByE2Hx_P03_transcript.srt",
+    }
+    assert filename_sets[1] == {
+        "BV1DfrdByE2Hx_P04_study_notes.md",
+        "BV1DfrdByE2Hx_P04_study_notes_B.md",
+        "BV1DfrdByE2Hx_P04_segmented_notes.md",
+        "BV1DfrdByE2Hx_P04_transcript.txt",
+        "BV1DfrdByE2Hx_P04_transcript.srt",
+    }
+    assert filename_sets[0].isdisjoint(filename_sets[1])
+
+
 def test_generate_notes_dispatches_two_or_more_selected_parts_to_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -359,6 +359,70 @@ def test_collection_single_selection_names_every_note_with_page_number(
     assert report.segmented_output_path.name == "BV1DfrdByE2Hx_P03_segmented_notes.md"
 
 
+def test_consecutive_collection_single_selections_do_not_overwrite_notes(
+    tmp_path: Path,
+) -> None:
+    primary = resolve_note_template("course")
+    secondary = resolve_note_template("technical")
+
+    for page_number in (3, 4):
+        collection = VideoCollection(
+            "BV1DfrdByE2Hx",
+            "Python 课程",
+            "",
+            (
+                VideoPart(
+                    page_number,
+                    f"第{page_number}章",
+                    f"https://example.test?p={page_number}",
+                ),
+            ),
+        )
+        transcript = Transcript(
+            "bilibili",
+            "zh-CN",
+            (TranscriptCue(0.0, 1.0, f"P{page_number} 字幕"),),
+        )
+        video = VideoSubtitle(
+            collection.bvid,
+            f"第{page_number}章",
+            "",
+            transcript,
+        )
+
+        process_single_part_video(
+            collection,
+            output_root=tmp_path,
+            output_page_number=page_number,
+            note_template=primary,
+            secondary_note_template=secondary,
+            generate_segmented_notes=True,
+            subtitle_fetcher=lambda *_args, _video=video, **_kwargs: _video,
+            notes_generator=lambda text, **_kwargs: f"# 总体笔记\n{text}",
+            segment_planner=lambda *_args, **_kwargs: SegmentPlan(
+                (SemanticSegment("一段", 0.0, 1.0),)
+            ),
+            segment_notes_generator=lambda *_args, **_kwargs: (
+                SegmentNoteContent("正文", ("重点",)),
+            ),
+        )
+
+    assert sorted(path.name for path in tmp_path.glob("BV1DfrdByE2Hx_P*.md")) == [
+        "BV1DfrdByE2Hx_P03_segmented_notes.md",
+        "BV1DfrdByE2Hx_P03_study_notes.md",
+        "BV1DfrdByE2Hx_P03_study_notes_B.md",
+        "BV1DfrdByE2Hx_P04_segmented_notes.md",
+        "BV1DfrdByE2Hx_P04_study_notes.md",
+        "BV1DfrdByE2Hx_P04_study_notes_B.md",
+    ]
+    assert "P3 字幕" in (
+        tmp_path / "BV1DfrdByE2Hx_P03_study_notes.md"
+    ).read_text(encoding="utf-8")
+    assert "P4 字幕" in (
+        tmp_path / "BV1DfrdByE2Hx_P04_study_notes.md"
+    ).read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("failure_stage", ["plan", "contents"])
 def test_segment_failure_preserves_overall_and_writes_no_pseudo_complete_file(
     tmp_path: Path,
