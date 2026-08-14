@@ -118,11 +118,13 @@ def save_single_part_notes(
     *,
     output_root: Path,
     bvid: str,
+    page_number: int | None = None,
 ) -> Path:
-    """按现有单 P 规则保存为 ``BV号_study_notes.md``。"""
+    """保存总体笔记；合集单选时把 P 号写入文件名。"""
 
     output_root.mkdir(parents=True, exist_ok=True)
-    output_path = output_root / f"{bvid}_study_notes.md"
+    prefix = _single_part_output_prefix(bvid, page_number)
+    output_path = output_root / f"{prefix}_study_notes.md"
     output_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
     return output_path
 
@@ -133,11 +135,13 @@ def save_secondary_notes(
     output_root: Path,
     bvid: str,
     suffix: str = "B",
+    page_number: int | None = None,
 ) -> Path:
     """保存第二份总体笔记，避免覆盖主笔记。"""
 
     output_root.mkdir(parents=True, exist_ok=True)
-    output_path = output_root / f"{bvid}_study_notes_{suffix}.md"
+    prefix = _single_part_output_prefix(bvid, page_number)
+    output_path = output_root / f"{prefix}_study_notes_{suffix}.md"
     output_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
     return output_path
 
@@ -147,18 +151,20 @@ def save_segmented_notes(
     *,
     output_root: Path,
     bvid: str,
+    page_number: int | None = None,
 ) -> Path:
-    """原子保存 ``BV号_segmented_notes.md``，失败时不留下半成品。"""
+    """原子保存分段笔记，失败时不留下半成品。"""
 
     output_root.mkdir(parents=True, exist_ok=True)
-    output_path = output_root / f"{bvid}_segmented_notes.md"
+    prefix = _single_part_output_prefix(bvid, page_number)
+    output_path = output_root / f"{prefix}_segmented_notes.md"
     temporary_path: Path | None = None
     try:
         with NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
             dir=output_root,
-            prefix=f".{bvid}_segmented_notes_",
+            prefix=f".{prefix}_segmented_notes_",
             suffix=".tmp",
             delete=False,
         ) as temporary_file:
@@ -170,6 +176,16 @@ def save_segmented_notes(
             temporary_path.unlink(missing_ok=True)
         raise
     return output_path
+
+
+def _single_part_output_prefix(bvid: str, page_number: int | None) -> str:
+    """为普通单 P 和合集单选生成互不覆盖的文件名前缀。"""
+
+    if page_number is None:
+        return bvid
+    if page_number < 1:
+        raise ValueError("分 P 序号必须大于等于 1。")
+    return f"{bvid}_P{page_number:02d}"
 
 
 def save_course_summary(markdown: str, *, output_dir: Path) -> Path:
@@ -196,6 +212,7 @@ def process_single_part_video(
     secondary_note_template: ResolvedNoteTemplate | None = None,
     extra_instruction: str | None = None,
     generate_segmented_notes: bool = False,
+    output_page_number: int | None = None,
     cookies_from_browser: str | None = None,
     on_event: Callable[[str], None] | None = None,
     subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
@@ -243,6 +260,7 @@ def process_single_part_video(
         markdown,
         output_root=output_root,
         bvid=collection.bvid,
+        page_number=output_page_number,
     )
     emit(f"学习笔记已保存：{output_path.name}")
 
@@ -262,6 +280,7 @@ def process_single_part_video(
                 secondary_markdown,
                 output_root=output_root,
                 bvid=collection.bvid,
+                page_number=output_page_number,
             )
             emit(f"第二份总体笔记已保存：{secondary_output_path.name}")
         except (LLMError, OSError) as error:
@@ -303,6 +322,7 @@ def process_single_part_video(
             segmented_markdown,
             output_root=output_root,
             bvid=collection.bvid,
+            page_number=output_page_number,
         )
     except (LLMError, SegmentationError, OSError) as error:
         message = f"分段笔记生成失败，总体笔记已保留：{error}"

@@ -15,6 +15,7 @@ from bilibili import (
     get_video_parts,
 )
 from llm import LLMError
+from note_viewer import ViewerContent, validate_viewer_contents
 from pipeline import (
     MultiPartReport,
     PartErrorType,
@@ -77,6 +78,7 @@ class WebGenerationResult:
     secondary_filename: str | None = None
     secondary_error: str | None = None
     secondary_template: ResolvedNoteTemplate | None = None
+    viewer_contents: tuple[ViewerContent, ...] = ()
 
     @property
     def succeeded_count(self) -> int:
@@ -137,10 +139,10 @@ def estimate_deepseek_calls(
 ) -> int:
     """返回提交前应展示的最多 DeepSeek 逻辑调用次数。"""
 
-    if video_info.is_multi_part:
-        parts = selected_parts if selected_parts is not None else video_info.parts
-        return len(parts) + int(generate_collection_summary)
-    return 1 + int(generate_secondary_notes) + (2 if generate_segmented_notes else 0)
+    parts = selected_parts if selected_parts is not None else video_info.parts
+    if len(parts) == 1:
+        return 1 + int(generate_secondary_notes) + (2 if generate_segmented_notes else 0)
+    return len(parts) + int(generate_collection_summary)
 
 
 def _web_error_message(error: str | None) -> str | None:
@@ -156,14 +158,18 @@ def _web_error_message(error: str | None) -> str | None:
     return error
 
 
-def _read_single_part_report(report: SinglePartReport) -> WebPartResult:
+def _read_single_part_report(
+    report: SinglePartReport,
+    *,
+    page_number: int,
+) -> WebPartResult:
     """读取单 P 报告中的 Markdown，并整理为网页结果。"""
 
     try:
         markdown = report.output_path.read_text(encoding="utf-8")
     except OSError as error:
         return WebPartResult(
-            page_number=1,
+            page_number=page_number,
             title=report.video.title,
             error_type="processing_failed",
             error=f"读取已生成笔记失败：{error}",
@@ -171,7 +177,7 @@ def _read_single_part_report(report: SinglePartReport) -> WebPartResult:
             transcript=report.video.transcript,
         )
     return WebPartResult(
-        page_number=1,
+        page_number=page_number,
         title=report.video.title,
         markdown=markdown,
         filename=report.output_path.name,
@@ -247,7 +253,11 @@ def _read_multi_part_result(result: PartProcessingResult) -> WebPartResult:
     )
 
 
-def _read_multi_part_report(report: MultiPartReport) -> WebGenerationResult:
+def _read_multi_part_report(
+    report: MultiPartReport,
+    *,
+    include_transcript_in_viewer: bool = True,
+) -> WebGenerationResult:
     """读取多 P 报告中的分 P 笔记和合集总结。"""
 
     parts = tuple(_read_multi_part_result(result) for result in report.parts)
@@ -264,6 +274,44 @@ def _read_multi_part_report(report: MultiPartReport) -> WebGenerationResult:
         except OSError as error:
             summary_error = f"读取 summary.md 失败：{error}"
 
+    viewer_contents: list[ViewerContent] = []
+    for part in parts:
+        if part.succeeded and part.markdown is not None and part.filename is not None:
+            viewer_contents.append(
+                ViewerContent(
+                    content_id=f"part-{part.page_number}",
+                    label=f"P{part.page_number} 总体笔记",
+                    kind="part",
+                    text=part.markdown,
+                    filename=part.filename,
+                    template_name=None,
+                )
+            )
+        if include_transcript_in_viewer and part.transcript is not None:
+            viewer_contents.append(
+                ViewerContent(
+                    content_id=f"part-{part.page_number}-transcript",
+                    label=f"P{part.page_number} 原始字幕（B站）",
+                    kind="transcript",
+                    text=part.transcript.plain_text,
+                    filename=f"P{part.page_number}_transcript.txt",
+                    download_mime="text/plain",
+                    transcript_source=part.transcript.source,
+                    srt_text=part.transcript.to_srt(),
+                    srt_filename=f"P{part.page_number}_transcript.srt",
+                )
+            )
+    if summary_markdown is not None and summary_filename is not None:
+        viewer_contents.append(
+            ViewerContent(
+                content_id="collection-summary",
+                label="合集总结",
+                kind="overall",
+                text=summary_markdown,
+                filename=summary_filename,
+            )
+        )
+
     return WebGenerationResult(
         is_multi_part=True,
         parts=parts,
@@ -271,6 +319,7 @@ def _read_multi_part_report(report: MultiPartReport) -> WebGenerationResult:
         summary_filename=summary_filename,
         summary_error=summary_error,
         collection_summary_requested=report.collection_summary_requested,
+        viewer_contents=validate_viewer_contents(viewer_contents),
     )
 
 
@@ -282,6 +331,7 @@ def generate_notes(
     extra_instruction: str | None = None,
     generate_collection_summary: bool = False,
     generate_segmented_notes: bool = False,
+    include_transcript_in_viewer: bool = True,
     note_template: ResolvedNoteTemplate | None = None,
     secondary_note_template: ResolvedNoteTemplate | None = None,
     cookies_from_browser: str | None = None,
@@ -290,6 +340,9 @@ def generate_notes(
 ) -> WebGenerationResult:
     """把网页参数交给 pipeline，不在网页层复制字幕或模型调用逻辑。"""
 
+    if not selected_parts:
+        raise PartSelectionError("请至少选择一个分 P。")
+
     common_options = {
         "output_root": output_root,
         "note_mode": note_mode,
@@ -297,22 +350,36 @@ def generate_notes(
         "cookies_from_browser": cookies_from_browser,
         "on_event": on_event,
     }
-    if video_info.is_multi_part:
+    if len(selected_parts) >= 2:
         report = process_multi_part_video(
             video_info,
             selected_parts=selected_parts,
             generate_collection_summary=generate_collection_summary,
             **common_options,
         )
-        return _read_multi_part_report(report)
+        return _read_multi_part_report(
+            report,
+            include_transcript_in_viewer=include_transcript_in_viewer,
+        )
 
-    part = video_info.parts[0]
+    part = selected_parts[0]
+    selected_from_collection = video_info.is_multi_part
+    single_part_video_info = video_info
+    if selected_from_collection:
+        single_part_video_info = VideoCollection(
+            bvid=video_info.bvid,
+            title=video_info.title,
+            description=video_info.description,
+            parts=(part,),
+        )
+    output_page_number = part.page_number if selected_from_collection else None
     try:
         report = process_single_part_video(
-            video_info,
+            single_part_video_info,
             generate_segmented_notes=generate_segmented_notes,
             note_template=note_template,
             secondary_note_template=secondary_note_template,
+            output_page_number=output_page_number,
             **common_options,
         )
     except NoSubtitleError as error:
@@ -358,9 +425,70 @@ def generate_notes(
         report
     )
     secondary_markdown, secondary_filename, secondary_error = _read_secondary_report(report)
+    viewer_contents: list[ViewerContent] = []
+    part_result = _read_single_part_report(report, page_number=part.page_number)
+    if part_result.succeeded and part_result.markdown is not None and part_result.filename:
+        viewer_contents.append(
+            ViewerContent(
+                content_id="overall-a",
+                label="总体笔记 A",
+                kind="overall",
+                text=part_result.markdown,
+                filename=part_result.filename,
+                template_name=note_template.name if note_template else None,
+                section_keys=note_template.section_keys if note_template else (),
+            )
+        )
+    if secondary_markdown is not None and secondary_filename is not None:
+        viewer_contents.append(
+            ViewerContent(
+                content_id="overall-b",
+                label="总体笔记 B",
+                kind="secondary",
+                text=secondary_markdown,
+                filename=secondary_filename,
+                template_name=(
+                    secondary_note_template.name if secondary_note_template else None
+                ),
+                section_keys=(
+                    secondary_note_template.section_keys
+                    if secondary_note_template
+                    else ()
+                ),
+            )
+        )
+    if segmented_markdown is not None and segmented_filename is not None:
+        viewer_contents.append(
+            ViewerContent(
+                content_id="segmented",
+                label="内容分段笔记",
+                kind="segmented",
+                text=segmented_markdown,
+                filename=segmented_filename,
+            )
+        )
+    if include_transcript_in_viewer and report.video.transcript is not None:
+        transcript = report.video.transcript
+        transcript_prefix = report.video.bvid
+        if output_page_number is not None:
+            transcript_prefix += f"_P{output_page_number:02d}"
+        viewer_contents.append(
+            ViewerContent(
+                content_id="transcript",
+                label="原始字幕（B站）",
+                kind="transcript",
+                text=transcript.plain_text,
+                filename=f"{transcript_prefix}_transcript.txt",
+                download_mime="text/plain",
+                transcript_source=transcript.source,
+                srt_text=transcript.to_srt(),
+                srt_filename=f"{transcript_prefix}_transcript.srt",
+            )
+        )
+
     return WebGenerationResult(
         is_multi_part=False,
-        parts=(_read_single_part_report(report),),
+        parts=(part_result,),
         segmented_notes_requested=report.segmented_notes_requested,
         segmented_markdown=segmented_markdown,
         segmented_filename=segmented_filename,
@@ -370,4 +498,5 @@ def generate_notes(
         secondary_filename=secondary_filename,
         secondary_error=secondary_error,
         secondary_template=secondary_note_template,
+        viewer_contents=validate_viewer_contents(viewer_contents),
     )

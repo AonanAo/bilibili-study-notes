@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 
 import streamlit as st
+from streamlit.components.v1 import html as render_html
 
+import mindmap
+import note_viewer
 import web_service
 
 
@@ -32,6 +35,22 @@ def _format_description_markdown(description: str) -> str:
         line = re.sub(r"^(\s*)(#{1,6})(\s+)", r"\1\\\2\3", line)
         formatted_lines.append(line)
     return "  \n".join(formatted_lines)
+
+
+def _compact_viewer_markdown(markdown: str) -> str:
+    """缩小查看器中的文档标题，避免双栏里的一级标题挤压正文。"""
+
+    lines: list[str] = []
+    in_code_fence = False
+    for line in markdown.splitlines():
+        if line.lstrip().startswith("```"):
+            in_code_fence = not in_code_fence
+        if not in_code_fence:
+            matched = re.match(r"^(#{1,4})(\s+.*)$", line)
+            if matched:
+                line = "#" * min(6, len(matched.group(1)) + 2) + matched.group(2)
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def render_video_info(video_info: web_service.VideoCollection) -> None:
@@ -87,6 +106,115 @@ def _render_download_button(
     )
 
 
+def _render_viewer_download(content: note_viewer.ViewerContent, *, suffix: str) -> None:
+    """显示查看器内容的独立下载按钮。"""
+
+    st.download_button(
+        f"下载{content.label}",
+        data=content.text,
+        file_name=content.filename,
+        mime=content.download_mime,
+        key=f"download_viewer_{suffix}_{content.content_id}",
+    )
+    if content.kind == "transcript" and content.srt_text is not None and content.srt_filename is not None:
+        st.download_button(
+            "下载 SRT",
+            data=content.srt_text,
+            file_name=content.srt_filename,
+            mime="application/x-subrip",
+            key=f"download_viewer_srt_{suffix}_{content.content_id}",
+        )
+
+
+def _render_viewer_content(
+    content: note_viewer.ViewerContent,
+    *,
+    key: str,
+) -> None:
+    """渲染一份 Markdown、字幕或思维导图内容。"""
+
+    if content.kind == "transcript":
+        st.caption(f"来源：{content.transcript_source or '未知'}")
+        st.text(content.text)
+    else:
+        display_mode = st.radio(
+            "显示方式",
+            options=("Markdown", "思维导图"),
+            horizontal=True,
+            key=f"viewer_display_{key}_{content.content_id}",
+        )
+        if display_mode == "Markdown":
+            st.markdown(_compact_viewer_markdown(content.text))
+        else:
+            render_html(
+                mindmap.render_mindmap_html(content.text),
+                height=760,
+                scrolling=False,
+            )
+        if content.template_name:
+            suffix = "；".join(content.section_keys) if content.section_keys else "默认章节"
+            st.caption(f"模板：{content.template_name}；章节：{suffix}")
+    _render_viewer_download(content, suffix=key)
+
+
+def render_note_viewer(
+    contents: tuple[note_viewer.ViewerContent, ...],
+    *,
+    key_prefix: str,
+) -> None:
+    """显示单篇或双篇笔记查看器，不触发新的模型调用。"""
+
+    if not contents:
+        return
+    contents = note_viewer.validate_viewer_contents(contents)
+    st.markdown("#### 笔记查看器")
+    labels = {content.content_id: content.label for content in contents}
+    ids = tuple(labels)
+    view_mode = st.radio(
+        "查看方式",
+        options=("单篇阅读", "双篇对比"),
+        horizontal=True,
+        key=f"viewer_mode_{key_prefix}",
+    )
+    if view_mode == "单篇阅读":
+        selected_id = st.selectbox(
+            "选择内容",
+            options=ids,
+            format_func=labels.__getitem__,
+            key=f"viewer_single_{key_prefix}",
+        )
+        _render_viewer_content(
+            note_viewer.get_viewer_content(contents, selected_id),
+            key=f"{key_prefix}_single",
+        )
+        return
+
+    left_id = st.selectbox(
+        "左侧内容",
+        options=ids,
+        format_func=labels.__getitem__,
+        key=f"viewer_left_{key_prefix}",
+    )
+    right_options = tuple(content_id for content_id in ids if content_id != left_id)
+    if not right_options:
+        st.info("至少需要两份不同内容才能进行双篇对比。")
+        return
+    right_id = st.selectbox(
+        "右侧内容",
+        options=right_options,
+        format_func=labels.__getitem__,
+        key=f"viewer_right_{key_prefix}",
+    )
+    left, right = note_viewer.select_viewer_pair(contents, left_id, right_id)
+    left_column, right_column = st.columns(2)
+    with left_column:
+        st.markdown(f"##### {left.label}")
+        _render_viewer_content(left, key=f"{key_prefix}_left")
+    with right_column:
+        st.markdown(f"##### {right.label}")
+        _render_viewer_content(right, key=f"{key_prefix}_right")
+
+
 def render_generation_result(result: web_service.WebGenerationResult) -> None:
     """展示单 P、多 P 以及合集总结的结构化处理结果。"""
 
@@ -96,48 +224,22 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
         part = result.parts[0]
         if part.succeeded:
             st.success(f"P{part.page_number} {part.title}：总体笔记生成成功")
-            st.markdown(part.markdown)
-            _render_download_button(part, key="download_single_part")
+            if result.viewer_contents:
+                render_note_viewer(result.viewer_contents, key_prefix="single")
+            else:
+                st.markdown(part.markdown)
+                _render_download_button(part, key="download_single_part")
         elif part.error_type == "no_subtitle":
             st.warning(f"P{part.page_number} {part.title}：{part.error}")
         else:
             st.error(f"P{part.page_number} {part.title}：生成失败：{part.error}")
 
-        if part.succeeded and result.segmented_notes_requested:
-            st.markdown("#### 分段笔记")
-            if result.segmented_markdown is not None:
-                st.success("语义分段笔记生成成功")
-                st.markdown(result.segmented_markdown)
-                st.download_button(
-                    "下载分段笔记 Markdown",
-                    data=result.segmented_markdown,
-                    file_name=(
-                        result.segmented_filename or "segmented_notes.md"
-                    ),
-                    mime="text/markdown",
-                    key="download_segmented_notes",
-                )
-            else:
-                st.error(result.segmented_error or "分段笔记生成失败。")
-                st.caption("总体笔记已保留，仍可查看和下载。")
-        if part.succeeded and result.secondary_template is not None:
-            st.markdown("#### 第二份总体笔记")
-            if result.secondary_markdown is not None:
-                label = result.secondary_template.name
-                if result.secondary_template.customized:
-                    label += "（已自定义）"
-                st.success(f"{label}生成成功")
-                st.markdown(result.secondary_markdown)
-                st.download_button(
-                    "下载第二份总体笔记 Markdown",
-                    data=result.secondary_markdown,
-                    file_name=result.secondary_filename or "study_notes_B.md",
-                    mime="text/markdown",
-                    key="download_secondary_notes",
-                )
-            else:
-                st.error(result.secondary_error or "第二份总体笔记生成失败。")
-                st.caption("第一份总体笔记已保留，仍可查看和下载。")
+        if part.succeeded and result.segmented_notes_requested and result.segmented_markdown is None:
+            st.error(result.segmented_error or "分段笔记生成失败。")
+            st.caption("总体笔记已保留，仍可查看和下载。")
+        if part.succeeded and result.secondary_template is not None and result.secondary_markdown is None:
+            st.error(result.secondary_error or "第二份总体笔记生成失败。")
+            st.caption("第一份总体笔记已保留，仍可查看和下载。")
         return
 
     st.write(
@@ -147,6 +249,7 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
     )
 
     successful_parts = tuple(part for part in result.parts if part.succeeded)
+    render_note_viewer(result.viewer_contents, key_prefix="multi")
     no_subtitle_parts = tuple(
         part for part in result.parts if part.error_type == "no_subtitle"
     )
@@ -154,16 +257,17 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
         part for part in result.parts if part.error_type == "processing_failed"
     )
 
-    st.markdown("#### 成功分P")
-    if not successful_parts:
-        st.caption("本次没有成功生成的分P笔记。")
-    for part in successful_parts:
-        with st.expander(f"P{part.page_number} {part.title}"):
-            st.markdown(part.markdown)
-            _render_download_button(
-                part,
-                key=f"download_part_{part.page_number}",
-            )
+    if not result.viewer_contents:
+        st.markdown("#### 成功分P")
+        if not successful_parts:
+            st.caption("本次没有成功生成的分P笔记。")
+        for part in successful_parts:
+            with st.expander(f"P{part.page_number} {part.title}"):
+                st.markdown(part.markdown)
+                _render_download_button(
+                    part,
+                    key=f"download_part_{part.page_number}",
+                )
 
     st.markdown("#### 无字幕分P")
     if not no_subtitle_parts:
@@ -177,51 +281,67 @@ def render_generation_result(result: web_service.WebGenerationResult) -> None:
     for part in failed_parts:
         st.error(f"P{part.page_number} {part.title}：{part.error}")
 
-    st.markdown("#### 合集总结")
-    if not result.collection_summary_requested:
-        st.info("本次已按设置跳过合集总结")
-    elif result.summary_markdown is not None:
-        st.success("summary.md 生成成功")
-        st.markdown(result.summary_markdown)
-        st.download_button(
-            "下载 summary.md",
-            data=result.summary_markdown,
-            file_name=result.summary_filename or "summary.md",
-            mime="text/markdown",
-            key="download_summary",
-        )
-    elif result.summary_error is not None:
-        st.error(f"summary.md 生成失败或无法读取：{result.summary_error}")
-        if successful_parts:
-            st.caption("成功生成的分P笔记已保留，仍可查看和下载。")
-    else:
-        st.caption("本次没有生成合集总结。")
+    if not result.viewer_contents:
+        st.markdown("#### 合集总结")
+        if not result.collection_summary_requested:
+            st.info("本次已按设置跳过合集总结")
+        elif result.summary_markdown is not None:
+            st.success("summary.md 生成成功")
+            st.markdown(result.summary_markdown)
+            st.download_button(
+                "下载 summary.md",
+                data=result.summary_markdown,
+                file_name=result.summary_filename or "summary.md",
+                mime="text/markdown",
+                key="download_summary",
+            )
+        elif result.summary_error is not None:
+            st.error(f"summary.md 生成失败或无法读取：{result.summary_error}")
+            if successful_parts:
+                st.caption("成功生成的分P笔记已保留，仍可查看和下载。")
+        else:
+            st.caption("本次没有生成合集总结。")
 
 
 def render_generation_form(video_info: web_service.VideoCollection) -> None:
     """收集分 P、笔记模式和额外要求，并交给网页适配层。"""
 
     st.markdown("### 生成学习笔记")
-    with st.form("notes_generation_form"):
+    with st.container(border=True):
         part_selection = None
         generate_collection_summary = False
         generate_segmented_notes = False
         generate_secondary_notes = False
+        include_transcript_in_viewer = True
         selected_template = None
         secondary_template = None
         secondary_section_keys = None
+        template_error = None
         secondary_template_error = None
+        note_mode = None
+
+        estimated_parts = video_info.parts
+        estimate_available = True
         if video_info.is_multi_part:
             part_selection = st.text_input(
                 "选择分P",
                 placeholder="例如：1；1,3,5；或 1,3,5-8；留空处理全部",
                 help="选择规则与命令行 --parts 完全一致。",
             )
-            generate_collection_summary = st.checkbox(
-                "生成额外的合集总结",
-                value=False,
-            )
-        else:
+            try:
+                estimated_parts = web_service.select_parts(video_info, part_selection)
+            except web_service.PartSelectionError:
+                estimate_available = False
+
+        single_part_mode = not video_info.is_multi_part or (
+            estimate_available and len(estimated_parts) == 1
+        )
+        if single_part_mode:
+            if video_info.is_multi_part:
+                selected_part = estimated_parts[0]
+                st.info(
+                    f"已单选 P{selected_part.page_number}，本次使用完整单 P 模式。"
+                )
             templates = web_service.get_note_template_options_for_web()
             template = st.selectbox(
                 "总体笔记预设",
@@ -229,7 +349,12 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 format_func=_format_note_template,
             )
             default_template = web_service.resolve_note_template(template.key)
-            if st.session_state.get("summary_template_key") != template.key:
+            reset_template_requested = st.session_state.pop(
+                "_reset_summary_template", False
+            )
+            if reset_template_requested or st.session_state.get(
+                "summary_template_key"
+            ) != template.key:
                 st.session_state["summary_section_keys"] = default_template.section_keys
                 st.session_state["summary_template_key"] = template.key
             section_keys = st.multiselect(
@@ -239,7 +364,6 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 format_func=lambda key: web_service.NOTE_SECTION_LIBRARY[key].title,
                 help="只能选择系统章节库中的章节；输出顺序按系统顺序排列。",
             )
-            template_error = None
             try:
                 selected_template = web_service.resolve_note_template(
                     template.key,
@@ -263,8 +387,12 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                     index=1 if template.key == templates[0].key else 0,
                     format_func=_format_note_template,
                 )
-                secondary_default = web_service.resolve_note_template(secondary_choice.key)
-                if st.session_state.get("secondary_template_key") != secondary_choice.key:
+                secondary_default = web_service.resolve_note_template(
+                    secondary_choice.key
+                )
+                if st.session_state.get(
+                    "secondary_template_key"
+                ) != secondary_choice.key:
                     st.session_state["secondary_summary_sections"] = (
                         secondary_default.section_keys
                     )
@@ -286,34 +414,36 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 else:
                     if secondary_template.customized:
                         st.caption("第二份总体笔记章节配置：已自定义")
-            else:
-                secondary_choice = None
             generate_segmented_notes = st.checkbox(
                 "生成按内容语义分段的笔记",
                 value=False,
                 help="总体笔记仍会生成；另用一次调用规划分段、一次调用生成全部分段内容。",
             )
-
-        if video_info.is_multi_part:
+            include_transcript_in_viewer = st.checkbox(
+                "在查看器中显示和下载原始字幕",
+                value=True,
+                help="不增加 DeepSeek 调用；取消后仍会获取字幕用于生成笔记，但不在查看器中展示或下载。",
+            )
+        else:
+            generate_collection_summary = st.checkbox(
+                "生成额外的合集总结",
+                value=False,
+            )
+            include_transcript_in_viewer = st.checkbox(
+                "在查看器中显示和下载原始字幕",
+                value=True,
+                help="不增加 DeepSeek 调用；取消后仍会获取字幕用于生成笔记，但不在查看器中展示或下载。",
+            )
             note_mode = st.selectbox(
                 "笔记模式",
                 options=(None, *web_service.get_note_mode_options()),
                 format_func=_format_note_mode,
             )
-        else:
-            note_mode = None
         extra_instruction = st.text_area(
             "额外学习要求（可选）",
             placeholder="例如：请重点解释代码实现和设计原因。",
         )
 
-        estimated_parts = video_info.parts
-        estimate_available = True
-        if video_info.is_multi_part:
-            try:
-                estimated_parts = web_service.select_parts(video_info, part_selection)
-            except web_service.PartSelectionError:
-                estimate_available = False
         if estimate_available:
             estimated_calls = web_service.estimate_deepseek_calls(
                 video_info,
@@ -325,15 +455,17 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
             st.info(f"预计最多调用 DeepSeek {estimated_calls} 次。")
         else:
             st.info("当前分P选择无效，修正后将显示预计调用次数。")
-        reset_submitted = st.form_submit_button("恢复模板默认设置") if not video_info.is_multi_part else False
-        generate_submitted = st.form_submit_button("生成学习笔记", type="primary")
+        reset_submitted = st.button("恢复模板默认设置") if single_part_mode else False
+        generate_submitted = st.button("生成学习笔记", type="primary")
 
     if reset_submitted:
-        st.session_state["summary_section_keys"] = default_template.section_keys
+        # 下一次运行时，在 multiselect 实例化前重置，避免 Streamlit 禁止
+        # 在控件创建后直接修改同名 session_state。
+        st.session_state["_reset_summary_template"] = True
         st.rerun()
     if generate_submitted:
         if (
-            not video_info.is_multi_part
+            single_part_mode
             and (template_error is not None or secondary_template_error is not None)
         ):
             st.error("请至少保留一个总体笔记章节后再生成。")
@@ -354,6 +486,7 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 extra_instruction=extra_instruction.strip() or None,
                 generate_collection_summary=generate_collection_summary,
                 generate_segmented_notes=generate_segmented_notes,
+                include_transcript_in_viewer=include_transcript_in_viewer,
                 note_template=selected_template,
                 secondary_note_template=secondary_template,
                 cookies_from_browser=st.session_state.cookies_from_browser,
@@ -375,6 +508,7 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
 st.set_page_config(
     page_title="B站视频AI学习笔记",
     page_icon="📚",
+    layout="wide",
 )
 
 st.title("B站视频AI学习笔记")

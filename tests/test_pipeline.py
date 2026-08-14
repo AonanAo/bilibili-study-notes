@@ -319,6 +319,46 @@ def test_two_overall_notes_and_segmented_notes_run_in_four_call_order(
     assert report.segmented_output_path is not None
 
 
+def test_collection_single_selection_names_every_note_with_page_number(
+    tmp_path: Path,
+) -> None:
+    collection = VideoCollection(
+        "BV1DfrdByE2Hx",
+        "Python 课程",
+        "",
+        (VideoPart(3, "第三章", "https://example.test?p=3"),),
+    )
+    transcript = Transcript(
+        "bilibili", "zh-CN", (TranscriptCue(0.0, 1.0, "字幕"),)
+    )
+    video = VideoSubtitle(collection.bvid, "第三章", "", transcript)
+    primary = resolve_note_template("course")
+    secondary = resolve_note_template("technical")
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        output_page_number=3,
+        note_template=primary,
+        secondary_note_template=secondary,
+        generate_segmented_notes=True,
+        subtitle_fetcher=lambda *_args, **_kwargs: video,
+        notes_generator=lambda *_args, **_kwargs: "# 总体笔记",
+        segment_planner=lambda *_args, **_kwargs: SegmentPlan(
+            (SemanticSegment("一段", 0.0, 1.0),)
+        ),
+        segment_notes_generator=lambda *_args, **_kwargs: (
+            SegmentNoteContent("正文", ("重点",)),
+        ),
+    )
+
+    assert report.output_path.name == "BV1DfrdByE2Hx_P03_study_notes.md"
+    assert report.secondary_output_path is not None
+    assert report.secondary_output_path.name == "BV1DfrdByE2Hx_P03_study_notes_B.md"
+    assert report.segmented_output_path is not None
+    assert report.segmented_output_path.name == "BV1DfrdByE2Hx_P03_segmented_notes.md"
+
+
 @pytest.mark.parametrize("failure_stage", ["plan", "contents"])
 def test_segment_failure_preserves_overall_and_writes_no_pseudo_complete_file(
     tmp_path: Path,

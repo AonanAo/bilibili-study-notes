@@ -185,8 +185,21 @@ def test_estimated_call_count_for_single_and_multi_part() -> None:
             generate_collection_summary=True,
             generate_segmented_notes=True,
         )
-        == 2
+        == 3
     )
+    assert web_service.estimate_deepseek_calls(
+        multi,
+        selected_parts=(multi.parts[1],),
+        generate_secondary_notes=True,
+        generate_segmented_notes=True,
+    ) == 4
+    assert web_service.estimate_deepseek_calls(
+        multi,
+        selected_parts=multi.parts[:2],
+        generate_collection_summary=True,
+        generate_secondary_notes=True,
+        generate_segmented_notes=True,
+    ) == 3
     assert web_service.estimate_deepseek_calls(
         single,
         generate_secondary_notes=True,
@@ -322,6 +335,75 @@ def test_generate_notes_reads_secondary_reported_file_only(
     assert result.secondary_error is None
 
 
+def test_single_part_result_exposes_viewer_contents_without_new_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+    overall = tmp_path / "BV1DfrdByE2Hx_study_notes.md"
+    segmented = tmp_path / "BV1DfrdByE2Hx_segmented_notes.md"
+    overall.write_text("# 总体\n- 要点\n", encoding="utf-8")
+    segmented.write_text("# 分段\n- 重点\n", encoding="utf-8")
+    transcript = _transcript("字幕内容")
+    video = VideoSubtitle(collection.bvid, "Python", "", transcript)
+    template = resolve_note_template("technical")
+    monkeypatch.setattr(
+        web_service,
+        "process_single_part_video",
+        lambda *_args, **_kwargs: SinglePartReport(
+            video,
+            overall,
+            segmented_notes_requested=True,
+            segmented_output_path=segmented,
+        ),
+    )
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        generate_segmented_notes=True,
+        note_template=template,
+        output_root=tmp_path,
+    )
+
+    assert [content.content_id for content in result.viewer_contents] == [
+        "overall-a",
+        "segmented",
+        "transcript",
+    ]
+    assert result.viewer_contents[0].template_name == template.name
+    assert result.viewer_contents[-1].kind == "transcript"
+    assert result.viewer_contents[-1].transcript_source == "bilibili"
+    assert result.viewer_contents[-1].srt_text == transcript.to_srt()
+
+
+def test_single_part_can_hide_transcript_from_viewer_without_changing_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+    overall = tmp_path / "BV1DfrdByE2Hx_study_notes.md"
+    overall.write_text("# 总体\n", encoding="utf-8")
+    video = VideoSubtitle(collection.bvid, "Python", "", _transcript("字幕内容"))
+    received: dict[str, object] = {}
+
+    def fake_process(*_args, **kwargs):
+        received.update(kwargs)
+        return SinglePartReport(video, overall)
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_process)
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        include_transcript_in_viewer=False,
+        output_root=tmp_path,
+    )
+
+    assert [content.content_id for content in result.viewer_contents] == ["overall-a"]
+    assert "include_transcript_in_viewer" not in received
+
+
 def test_historical_segmented_file_is_not_read_after_current_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -365,12 +447,86 @@ def test_historical_segmented_file_is_not_read_after_current_failure(
     assert historical_path not in read_paths
 
 
-def test_generate_notes_dispatches_selected_multi_parts_to_pipeline(
+def test_generate_notes_dispatches_one_selected_part_to_full_single_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     collection = _collection(part_count=3)
-    selected_parts = (collection.parts[1],)
+    selected_part = collection.parts[1]
+    overall = tmp_path / "BV1DfrdByE2Hx_P02_study_notes.md"
+    secondary = tmp_path / "BV1DfrdByE2Hx_P02_study_notes_B.md"
+    segmented = tmp_path / "BV1DfrdByE2Hx_P02_segmented_notes.md"
+    overall.write_text("# 总体 A\n", encoding="utf-8")
+    secondary.write_text("# 总体 B\n", encoding="utf-8")
+    segmented.write_text("# 分段\n", encoding="utf-8")
+    transcript = _transcript("第二章字幕")
+    video = VideoSubtitle(collection.bvid, "第二章", "", transcript)
+    primary_template = resolve_note_template("course")
+    secondary_template = resolve_note_template("technical")
+    received: dict[str, object] = {}
+
+    def fake_single(video_info, **kwargs):
+        received["video_info"] = video_info
+        received.update(kwargs)
+        return SinglePartReport(
+            video,
+            overall,
+            segmented_notes_requested=True,
+            segmented_output_path=segmented,
+            secondary_output_path=secondary,
+            secondary_template=secondary_template,
+        )
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_single)
+    monkeypatch.setattr(
+        web_service,
+        "process_multi_part_video",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("单选分 P 不应进入批量流程")
+        ),
+    )
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=(selected_part,),
+        note_template=primary_template,
+        secondary_note_template=secondary_template,
+        generate_segmented_notes=True,
+        generate_collection_summary=True,
+        output_root=tmp_path,
+    )
+
+    single_video_info = received["video_info"]
+    assert isinstance(single_video_info, VideoCollection)
+    assert single_video_info is not collection
+    assert single_video_info.parts == (selected_part,)
+    assert received["output_page_number"] == 2
+    assert received["note_template"] is primary_template
+    assert received["secondary_note_template"] is secondary_template
+    assert received["generate_segmented_notes"] is True
+    assert "generate_collection_summary" not in received
+    assert result.is_multi_part is False
+    assert result.parts[0].page_number == 2
+    assert result.parts[0].filename == overall.name
+    assert result.secondary_filename == secondary.name
+    assert result.segmented_filename == segmented.name
+    assert [content.filename for content in result.viewer_contents] == [
+        "BV1DfrdByE2Hx_P02_study_notes.md",
+        "BV1DfrdByE2Hx_P02_study_notes_B.md",
+        "BV1DfrdByE2Hx_P02_segmented_notes.md",
+        "BV1DfrdByE2Hx_P02_transcript.txt",
+    ]
+    assert result.viewer_contents[-1].srt_filename == (
+        "BV1DfrdByE2Hx_P02_transcript.srt"
+    )
+
+
+def test_generate_notes_dispatches_two_or_more_selected_parts_to_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=3)
+    selected_parts = collection.parts[1:]
     received: dict[str, object] = {}
     events: list[str] = []
     on_event = events.append
