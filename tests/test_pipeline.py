@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import contextmanager
 
 import pytest
 
-from bilibili import NoSubtitleError, VideoCollection, VideoPart, VideoSubtitle
+from bilibili import (
+    NoSubtitleError,
+    SubtitleLoginRequiredError,
+    VideoCollection,
+    VideoPart,
+    VideoSubtitle,
+)
+from audio import AudioArtifact
 from llm import LLMError
 from prompt import resolve_note_template
 from pipeline import (
@@ -100,6 +108,116 @@ def test_single_part_pipeline_passes_web_options_and_keeps_output_name(
     assert report.video.transcript.plain_text == "字幕正文"
     assert report.output_path == tmp_path / "BV1DfrdByE2Hx_study_notes.md"
     assert report.output_path.read_text(encoding="utf-8") == "# 视频主题\n单P笔记\n"
+
+
+def test_single_part_uses_subtitle_before_initializing_asr(
+    tmp_path: Path,
+) -> None:
+    collection = VideoCollection(
+        bvid="BV1DfrdByE2Hx",
+        title="Python 视频",
+        description="简介",
+        parts=(VideoPart(1, "Python 视频", "https://example.test/video"),),
+    )
+    video = VideoSubtitle(collection.bvid, "真实标题", "真实简介", _transcript("字幕"))
+    factory_calls: list[str] = []
+    download_calls: list[str] = []
+
+    def fake_factory():
+        factory_calls.append("created")
+        raise AssertionError("字幕成功时不应创建 ASR")
+
+    def fake_download(*_args: object, **_kwargs: object):
+        download_calls.append("downloaded")
+        raise AssertionError("字幕成功时不应下载音频")
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        enable_asr_fallback=True,
+        transcriber_factory=fake_factory,
+        audio_downloader=fake_download,
+        subtitle_fetcher=lambda *_args, **_kwargs: video,
+        notes_generator=lambda *_args, **_kwargs: "# 视频主题\n笔记",
+    )
+
+    assert report.video.transcript.source == "bilibili"
+    assert factory_calls == []
+    assert download_calls == []
+
+
+def test_multi_part_asr_fallback_reuses_transcriber_and_keeps_source(
+    tmp_path: Path,
+) -> None:
+    collection = _collection()
+    factory_calls: list[str] = []
+    transcribe_calls: list[tuple[Path, str | None]] = []
+    download_calls: list[tuple[str, str, int, str | None]] = []
+
+    def fake_fetch(url: str, **_kwargs: object) -> VideoSubtitle:
+        page_number = int(url.rsplit("=", 1)[1])
+        if page_number == 1:
+            return VideoSubtitle(
+                collection.bvid,
+                "第一章",
+                "",
+                _transcript("字幕优先"),
+            )
+        if page_number == 2:
+            raise NoSubtitleError("没有字幕", video_title="第二章真实标题")
+        raise SubtitleLoginRequiredError("需要登录", video_title="第三章真实标题")
+
+    @contextmanager
+    def fake_download(
+        url: str,
+        *,
+        video_id: str,
+        part: int,
+        cookies_from_browser: str | None,
+    ):
+        path = tmp_path / f"P{part:02d}.m4a"
+        path.write_bytes(b"audio")
+        download_calls.append((url, video_id, part, cookies_from_browser))
+        yield AudioArtifact(path=path, video_id=video_id, part=part)
+
+    class FakeTranscriber:
+        def transcribe(self, audio_path: Path, *, language: str | None = None):
+            transcribe_calls.append((audio_path, language))
+            return Transcript(
+                source="asr",
+                language="zh",
+                cues=(TranscriptCue(0.0, 1.0, audio_path.stem),),
+            )
+
+    def fake_factory() -> FakeTranscriber:
+        factory_calls.append("created")
+        return FakeTranscriber()
+
+    report = process_multi_part_video(
+        collection,
+        output_root=tmp_path,
+        cookies_from_browser="chrome",
+        enable_asr_fallback=True,
+        transcriber_factory=fake_factory,
+        audio_downloader=fake_download,
+        subtitle_fetcher=fake_fetch,
+        notes_generator=lambda subtitle_text, **_kwargs: f"# 视频主题\n{subtitle_text}",
+        summary_generator=lambda *_args, **_kwargs: "# 合集总结\n总结",
+    )
+
+    assert report.succeeded_count == 3
+    assert factory_calls == ["created"]
+    assert download_calls == [
+        (collection.parts[1].url, collection.bvid, 2, "chrome"),
+        (collection.parts[2].url, collection.bvid, 3, "chrome"),
+    ]
+    assert [call[0].name for call in transcribe_calls] == ["P02.m4a", "P03.m4a"]
+    assert all(call[1] is None for call in transcribe_calls)
+    assert report.parts[0].transcript.source == "bilibili"
+    assert report.parts[1].transcript.source == "asr"
+    assert report.parts[2].transcript.source == "asr"
+    assert report.parts[1].title == "第二章真实标题"
+    assert report.parts[2].title == "第三章真实标题"
 
 
 def test_single_part_default_keeps_one_model_call_and_no_segment_file(

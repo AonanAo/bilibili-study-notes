@@ -6,11 +6,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Callable, Literal
+from typing import Callable, ContextManager, Literal
+
+from audio import AudioArtifact, AudioError, download_audio
 
 from bilibili import (
     BilibiliError,
     NoSubtitleError,
+    SubtitleLoginRequiredError,
     VideoCollection,
     VideoPart,
     VideoSubtitle,
@@ -32,11 +35,140 @@ from segmentation import (
     render_segmented_notes,
 )
 from transcript import Transcript
+from transcriber import Transcriber, TranscriberError
 
 
 # Windows/macOS/Linux 都不适合出现在文件名中的字符。
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 PartErrorType = Literal["no_subtitle", "processing_failed"]
+
+
+class ASRFallbackError(BilibiliError):
+    """字幕不可用且 ASR 回退也失败。"""
+
+    def __init__(self, message: str, *, video_title: str = "") -> None:
+        super().__init__(message)
+        self.video_title = video_title
+
+
+AudioDownloader = Callable[..., ContextManager[AudioArtifact]]
+
+
+def _default_transcriber_factory() -> Transcriber:
+    """延迟创建默认 MLX 转录器，避免字幕成功时加载可选依赖。"""
+
+    from mlx_transcriber import create_mlx_transcriber
+
+    return create_mlx_transcriber()
+
+
+class SubtitleFirstASRFallback:
+    """按任务复用转录器的字幕优先解析器。"""
+
+    def __init__(
+        self,
+        *,
+        subtitle_fetcher: Callable[..., VideoSubtitle],
+        transcriber_factory: Callable[[], Transcriber] | None = None,
+        audio_downloader: AudioDownloader = download_audio,
+        asr_language: str | None = None,
+    ) -> None:
+        self._subtitle_fetcher = subtitle_fetcher
+        self._transcriber_factory = transcriber_factory or _default_transcriber_factory
+        self._audio_downloader = audio_downloader
+        self._asr_language = asr_language
+        self._transcriber: Transcriber | None = None
+
+    def fetch(
+        self,
+        video_url: str,
+        *,
+        bvid: str,
+        part: int,
+        fallback_title: str,
+        fallback_description: str,
+        cookies_from_browser: str | None,
+        on_event: Callable[[str], None] | None = None,
+    ) -> VideoSubtitle:
+        """先获取字幕；缺失或需登录时下载音频并回退到 ASR。"""
+
+        try:
+            return self._subtitle_fetcher(
+                video_url,
+                cookies_from_browser=cookies_from_browser,
+            )
+        except (NoSubtitleError, SubtitleLoginRequiredError) as subtitle_error:
+            title = getattr(subtitle_error, "video_title", "") or fallback_title
+            if on_event is not None:
+                on_event("字幕不可用，正在下载音频并使用 ASR 回退……")
+
+            try:
+                if self._transcriber is None:
+                    self._transcriber = self._transcriber_factory()
+                with self._audio_downloader(
+                    video_url,
+                    video_id=bvid,
+                    part=part,
+                    cookies_from_browser=cookies_from_browser,
+                ) as artifact:
+                    transcript = self._transcriber.transcribe(
+                        artifact.path,
+                        language=self._asr_language,
+                    )
+            except (AudioError, TranscriberError, OSError, ValueError) as error:
+                raise ASRFallbackError(
+                    f"字幕不可用，ASR 回退失败：{error}",
+                    video_title=title,
+                ) from error
+            except Exception as error:
+                # 可选引擎加载和第三方下载器异常也应归入当前分 P，
+                # 不能让一个回退失败中断多 P 任务。
+                raise ASRFallbackError(
+                    f"字幕不可用，ASR 回退失败：{error}",
+                    video_title=title,
+                ) from error
+
+            if on_event is not None:
+                on_event("ASR 回退成功，已获得带时间轴转录。")
+            return VideoSubtitle(
+                bvid=bvid,
+                title=title,
+                description=fallback_description,
+                transcript=transcript,
+            )
+
+
+def fetch_video_subtitle_with_asr_fallback(
+    video_url: str,
+    *,
+    bvid: str,
+    part: int = 1,
+    fallback_title: str = "",
+    fallback_description: str = "",
+    cookies_from_browser: str | None = None,
+    subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
+    transcriber_factory: Callable[[], Transcriber] | None = None,
+    audio_downloader: AudioDownloader = download_audio,
+    asr_language: str | None = None,
+    on_event: Callable[[str], None] | None = None,
+) -> VideoSubtitle:
+    """一次性执行字幕优先、ASR 回退流程。"""
+
+    resolver = SubtitleFirstASRFallback(
+        subtitle_fetcher=subtitle_fetcher or fetch_video_subtitle,
+        transcriber_factory=transcriber_factory,
+        audio_downloader=audio_downloader,
+        asr_language=asr_language,
+    )
+    return resolver.fetch(
+        video_url,
+        bvid=bvid,
+        part=part,
+        fallback_title=fallback_title,
+        fallback_description=fallback_description,
+        cookies_from_browser=cookies_from_browser,
+        on_event=on_event,
+    )
 
 
 @dataclass
@@ -214,6 +346,10 @@ def process_single_part_video(
     generate_segmented_notes: bool = False,
     output_page_number: int | None = None,
     cookies_from_browser: str | None = None,
+    asr_language: str | None = None,
+    enable_asr_fallback: bool | None = None,
+    transcriber_factory: Callable[[], Transcriber] | None = None,
+    audio_downloader: AudioDownloader | None = None,
     on_event: Callable[[str], None] | None = None,
     subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
     notes_generator: Callable[..., str] | None = None,
@@ -237,11 +373,39 @@ def process_single_part_video(
     emit = on_event or (lambda _message: None)
     part = collection.parts[0]
 
-    emit("正在获取视频字幕……")
-    video = fetch_subtitle(
-        part.url,
-        cookies_from_browser=cookies_from_browser,
+    # 注入式旧调用保持“只测字幕”的行为；正式入口未注入 fetcher 时默认开启。
+    fallback_enabled = (
+        enable_asr_fallback
+        if enable_asr_fallback is not None
+        else subtitle_fetcher is None
     )
+    fallback = (
+        SubtitleFirstASRFallback(
+            subtitle_fetcher=fetch_subtitle,
+            transcriber_factory=transcriber_factory,
+            audio_downloader=audio_downloader or download_audio,
+            asr_language=asr_language,
+        )
+        if fallback_enabled
+        else None
+    )
+
+    emit("正在获取视频字幕……")
+    if fallback is None:
+        video = fetch_subtitle(
+            part.url,
+            cookies_from_browser=cookies_from_browser,
+        )
+    else:
+        video = fallback.fetch(
+            part.url,
+            bvid=collection.bvid,
+            part=part.page_number,
+            fallback_title=part.title,
+            fallback_description=collection.description,
+            cookies_from_browser=cookies_from_browser,
+            on_event=emit,
+        )
     emit(f"正在调用 DeepSeek：{video.title}")
 
     note_options = {
@@ -358,6 +522,10 @@ def process_multi_part_video(
     extra_instruction: str | None = None,
     generate_collection_summary: bool = True,
     cookies_from_browser: str | None = None,
+    asr_language: str | None = None,
+    enable_asr_fallback: bool | None = None,
+    transcriber_factory: Callable[[], Transcriber] | None = None,
+    audio_downloader: AudioDownloader | None = None,
     on_event: Callable[[str], None] | None = None,
     subtitle_fetcher: Callable[..., VideoSubtitle] | None = None,
     notes_generator: Callable[..., str] | None = None,
@@ -383,6 +551,23 @@ def process_multi_part_video(
     parts_to_process = selected_parts if selected_parts is not None else collection.parts
     total = len(parts_to_process)
 
+    # 同一个 resolver 覆盖整次任务，确保模型/转录器只创建一次并复用。
+    fallback_enabled = (
+        enable_asr_fallback
+        if enable_asr_fallback is not None
+        else subtitle_fetcher is None
+    )
+    fallback = (
+        SubtitleFirstASRFallback(
+            subtitle_fetcher=fetch_subtitle,
+            transcriber_factory=transcriber_factory,
+            audio_downloader=audio_downloader or download_audio,
+            asr_language=asr_language,
+        )
+        if fallback_enabled
+        else None
+    )
+
     for position, part in enumerate(parts_to_process, start=1):
         result = PartProcessingResult(
             page_number=part.page_number,
@@ -394,10 +579,23 @@ def process_multi_part_video(
         )
 
         try:
-            video = fetch_subtitle(
-                part.url,
-                cookies_from_browser=cookies_from_browser,
-            )
+            if fallback is None:
+                video = fetch_subtitle(
+                    part.url,
+                    cookies_from_browser=cookies_from_browser,
+                )
+            else:
+                video = fallback.fetch(
+                    part.url,
+                    bvid=collection.bvid,
+                    part=part.page_number,
+                    fallback_title=part.title,
+                    fallback_description=collection.description,
+                    cookies_from_browser=cookies_from_browser,
+                    on_event=lambda message, _part=part: emit(
+                        f"[P{_part.page_number:02d}] {message}"
+                    ),
+                )
             result.title = video.title
             result.transcript = video.transcript
             emit(f"[P{part.page_number:02d}] 正在调用 DeepSeek：{result.title}")
@@ -424,6 +622,7 @@ def process_multi_part_video(
             emit(f"[P{part.page_number:02d}] {result.error}")
         except (BilibiliError, LLMError, OSError) as error:
             # 一个 P 失败时只记录，继续处理下一个 P。
+            result.title = getattr(error, "video_title", "") or result.title
             result.error = str(error)
             result.error_type = "processing_failed"
             emit(f"[P{part.page_number:02d}] 处理失败，已继续：{error}")

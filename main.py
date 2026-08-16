@@ -13,7 +13,10 @@ from bilibili import (
     get_video_parts,
 )
 from llm import LLMError, generate_study_notes
-from pipeline import process_multi_part_video
+from pipeline import (
+    fetch_video_subtitle_with_asr_fallback,
+    process_multi_part_video,
+)
 from prompt import get_selectable_note_modes
 from selection import PartSelectionError, select_video_parts
 
@@ -157,9 +160,14 @@ def main() -> int:
 
     # 单 P 视频继续走原有流程，输出文件名和使用方式都不变。
     try:
-        result = fetch_video_subtitle(
+        result = fetch_video_subtitle_with_asr_fallback(
             video_url,
+            bvid=bvid,
+            fallback_title=getattr(collection, "title", ""),
+            fallback_description=getattr(collection, "description", ""),
             cookies_from_browser=args.cookies_from_browser,
+            subtitle_fetcher=fetch_video_subtitle,
+            on_event=print,
         )
     except BilibiliError as error:
         # 错误写到标准错误流，便于脚本调用时识别失败。
@@ -167,7 +175,10 @@ def main() -> int:
         return 1
 
     print(f"视频标题：{result.title}")
-    print(f"字幕获取成功：{len(result.subtitle_text)} 个字符")
+    if getattr(getattr(result, "transcript", None), "source", "bilibili") == "asr":
+        print(f"字幕不可用，ASR 回退成功：{len(result.subtitle_text)} 个字符")
+    else:
+        print(f"字幕获取成功：{len(result.subtitle_text)} 个字符")
     print("正在调用 DeepSeek 生成学习笔记……")
 
     try:

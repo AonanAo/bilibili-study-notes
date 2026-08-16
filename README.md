@@ -1,6 +1,6 @@
 # B 站视频 AI 学习笔记工具
 
-输入一个 B 站视频链接或 BV 号，先获取视频字幕，再调用 DeepSeek API 生成 Markdown 学习笔记。项目同时提供命令行和 Streamlit 网页入口，支持自动检测同一 BV 号下的多 P 视频，逐 P 生成笔记后再生成课程总结。
+输入一个 B 站视频链接或 BV 号，优先获取视频字幕；没有字幕时自动下载纯音频并回退到 ASR，再调用 DeepSeek API 生成 Markdown 学习笔记。项目同时提供命令行和 Streamlit 网页入口，支持自动检测同一 BV 号下的多 P 视频，逐 P 生成笔记后再生成课程总结。
 
 项目使用维护活跃的开源项目 [yt-dlp](https://github.com/yt-dlp/yt-dlp) 解析 B 站页面和字幕接口，不自行模拟浏览器请求。
 模型调用使用 DeepSeek 官方文档推荐的 OpenAI Python SDK 兼容接口。
@@ -11,6 +11,9 @@
 .
 ├── bilibili.py          # 独立字幕获取模块
 ├── transcript.py        # 带时间轴字幕数据及 TXT/SRT 转换
+├── audio.py              # audio-only 下载和临时文件生命周期
+├── transcriber.py        # ASR 统一接口和离线 benchmark
+├── mlx_transcriber.py    # MLX Whisper 可选适配器
 ├── llm.py               # DeepSeek API 调用模块
 ├── prompt.py            # 笔记模式、分 P 笔记和课程总结提示词
 ├── selection.py         # 分 P 选择表达式解析与校验
@@ -33,6 +36,16 @@
 - Python 3.10 或更高版本
 - 可以访问 B 站
 - DeepSeek API Key
+
+字幕回退使用 Apple Silicon 上的 `mlx-whisper`，它不是通用运行依赖。需要 ASR
+回退时另外安装可选依赖，并确保系统可以读取 yt-dlp 下载的音频格式：
+
+```bash
+python -m pip install mlx-whisper
+```
+
+未安装可选 ASR 依赖时，字幕成功的视频仍可正常处理；只有确实触发回退时才会
+报告 ASR 回退失败。
 
 ## 安装
 
@@ -89,7 +102,7 @@ python main.py "https://www.bilibili.com/video/BV1DfrdByE2Hx/?spm_id_from=xxx"
 python main.py "BV1DfrdByE2Hx"
 ```
 
-程序会先输出 BV 号解析结果，再获取字幕、调用 DeepSeek，最后保存笔记：
+程序会先输出 BV 号解析结果，再优先获取字幕；必要时下载音频并回退到 ASR，随后调用 DeepSeek，最后保存笔记：
 
 ```text
 调试：实际提取到的 BV 号：BV1DfrdByE2Hx
@@ -296,10 +309,12 @@ python main.py "https://www.bilibili.com/video/BV1jJ411r7eH" --cookies-from-brow
 1. ……
 ```
 
-如果视频没有字幕，程序会明确输出：
+如果视频没有字幕，程序会先尝试 ASR 回退。字幕和 ASR 都不可用时，程序会明确报告回退失败；ASR 成功时会保留带时间轴的 `source="asr"` 转录，网页查看器仍可下载 TXT/SRT。
+
+如果字幕和 ASR 都不可用，程序会明确输出类似：
 
 ```text
-错误：该视频没有可用的 CC/AI 字幕。
+错误：字幕不可用，ASR 回退失败：……
 ```
 
 ## 在其他 Python 代码中调用
