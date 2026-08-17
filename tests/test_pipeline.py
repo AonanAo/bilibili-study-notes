@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import pytest
 
 from bilibili import (
+    BilibiliFetchError,
     NoSubtitleError,
     SubtitleLoginRequiredError,
     VideoCollection,
@@ -218,6 +219,197 @@ def test_multi_part_asr_fallback_reuses_transcriber_and_keeps_source(
     assert report.parts[2].transcript.source == "asr"
     assert report.parts[1].title == "第二章真实标题"
     assert report.parts[2].title == "第三章真实标题"
+
+
+def test_ordinary_bilibili_parse_error_does_not_trigger_asr(tmp_path: Path) -> None:
+    factory_calls: list[str] = []
+    download_calls: list[str] = []
+
+    def fake_factory() -> object:
+        factory_calls.append("created")
+        return object()
+
+    def fake_download(*_args: object, **_kwargs: object) -> object:
+        download_calls.append("downloaded")
+        return object()
+
+    def fake_fetch(*_args: object, **_kwargs: object) -> VideoSubtitle:
+        raise BilibiliFetchError("视频解析失败")
+
+    with pytest.raises(BilibiliFetchError, match="视频解析失败"):
+        process_single_part_video(
+            VideoCollection(
+                "BV1DfrdByE2Hx",
+                "Python 视频",
+                "",
+                (VideoPart(1, "Python 视频", "https://example.test/video"),),
+            ),
+            output_root=tmp_path,
+            enable_asr_fallback=True,
+            transcriber_factory=fake_factory,
+            audio_downloader=fake_download,
+            subtitle_fetcher=fake_fetch,
+        )
+
+    assert factory_calls == []
+    assert download_calls == []
+
+
+def test_multi_part_ordinary_parse_error_isolated_without_asr(
+    tmp_path: Path,
+) -> None:
+    collection = _collection()
+    factory_calls: list[str] = []
+    download_calls: list[str] = []
+
+    def fake_fetch(url: str, **_kwargs: object) -> VideoSubtitle:
+        if url.endswith("p=1"):
+            raise BilibiliFetchError("P1 视频解析失败")
+        return VideoSubtitle(
+            collection.bvid,
+            "第二章",
+            "",
+            _transcript("P2 字幕"),
+        )
+
+    def fake_factory() -> object:
+        factory_calls.append("created")
+        return object()
+
+    def fake_download(*_args: object, **_kwargs: object) -> object:
+        download_calls.append("downloaded")
+        return object()
+
+    report = process_multi_part_video(
+        collection,
+        output_root=tmp_path,
+        selected_parts=collection.parts[:2],
+        enable_asr_fallback=True,
+        transcriber_factory=fake_factory,
+        audio_downloader=fake_download,
+        subtitle_fetcher=fake_fetch,
+        notes_generator=lambda text, **_kwargs: f"# 笔记\n{text}",
+        summary_generator=lambda *_args, **_kwargs: "# 总结\n完成",
+    )
+
+    assert report.parts[0].error_type == "processing_failed"
+    assert report.parts[1].succeeded
+    assert factory_calls == []
+    assert download_calls == []
+
+
+def test_asr_transcript_enters_note_flow_with_timestamps(
+    tmp_path: Path,
+) -> None:
+    collection = VideoCollection(
+        "BV1DfrdByE2Hx",
+        "Python 视频",
+        "简介",
+        (VideoPart(1, "Python 视频", "https://example.test/video"),),
+    )
+    transcript = Transcript(
+        source="asr",
+        language="zh",
+        cues=(
+            TranscriptCue(0.0, 1.5, "第一句语音"),
+            TranscriptCue(1.5, 3.0, "第二句语音"),
+        ),
+    )
+    notes_input: list[str] = []
+
+    def fake_fetch(*_args: object, **_kwargs: object) -> VideoSubtitle:
+        raise NoSubtitleError("没有字幕", video_title="真实标题")
+
+    @contextmanager
+    def fake_download(*_args: object, **_kwargs: object):
+        yield AudioArtifact(
+            path=tmp_path / "P01.m4a",
+            video_id=collection.bvid,
+            part=1,
+        )
+
+    class FakeTranscriber:
+        def transcribe(self, _path: Path, *, language: str | None = None) -> Transcript:
+            assert language == "en"
+            return transcript
+
+    def fake_notes(subtitle_text: str, **_kwargs: object) -> str:
+        notes_input.append(subtitle_text)
+        return "# 视频主题\nASR 笔记"
+
+    report = process_single_part_video(
+        collection,
+        output_root=tmp_path,
+        enable_asr_fallback=True,
+        subtitle_fetcher=fake_fetch,
+        audio_downloader=fake_download,
+        transcriber_factory=FakeTranscriber,
+        notes_generator=fake_notes,
+        asr_language="en",
+    )
+
+    assert notes_input == ["第一句语音\n第二句语音"]
+    assert report.video.transcript.source == "asr"
+    assert [(cue.start_seconds, cue.end_seconds) for cue in report.video.transcript.cues] == [
+        (0.0, 1.5),
+        (1.5, 3.0),
+    ]
+    assert report.output_path.read_text(encoding="utf-8") == "# 视频主题\nASR 笔记\n"
+
+
+@pytest.mark.parametrize("failure_stage", ["download", "transcribe"])
+def test_multi_part_asr_failure_isolated_and_next_part_continues(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    collection = _collection()
+    factory_calls: list[str] = []
+
+    def fake_fetch(*_args: object, **_kwargs: object) -> VideoSubtitle:
+        raise NoSubtitleError("没有字幕")
+
+    @contextmanager
+    def fake_download(_url: str, *, part: int, **_kwargs: object):
+        if failure_stage == "download" and part == 1:
+            raise RuntimeError("P1 下载失败")
+        yield AudioArtifact(
+            path=tmp_path / f"P{part:02d}.m4a",
+            video_id=collection.bvid,
+            part=part,
+        )
+
+    class FakeTranscriber:
+        def transcribe(self, audio_path: Path, *, language: str | None = None) -> Transcript:
+            if failure_stage == "transcribe" and audio_path.name == "P01.m4a":
+                raise RuntimeError("P1 转录失败")
+            return Transcript(
+                source="asr",
+                language="zh",
+                cues=(TranscriptCue(0.0, 1.0, audio_path.stem),),
+            )
+
+    def fake_factory() -> FakeTranscriber:
+        factory_calls.append("created")
+        return FakeTranscriber()
+
+    report = process_multi_part_video(
+        collection,
+        output_root=tmp_path,
+        selected_parts=collection.parts[:2],
+        enable_asr_fallback=True,
+        subtitle_fetcher=fake_fetch,
+        audio_downloader=fake_download,
+        transcriber_factory=fake_factory,
+        notes_generator=lambda text, **_kwargs: f"# 笔记\n{text}",
+        summary_generator=lambda *_args, **_kwargs: "# 总结\n完成",
+    )
+
+    assert factory_calls == ["created"]
+    assert report.parts[0].error_type == "processing_failed"
+    assert report.parts[1].succeeded
+    assert report.parts[1].transcript is not None
+    assert report.parts[1].transcript.source == "asr"
+    assert (tmp_path / collection.bvid / "P02_第_2_分P.md").exists()
 
 
 def test_single_part_default_keeps_one_model_call_and_no_segment_file(

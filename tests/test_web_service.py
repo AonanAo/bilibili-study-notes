@@ -238,6 +238,7 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
         note_mode="technical",
         extra_instruction="重点解释原理。",
         cookies_from_browser="chrome",
+        asr_language="en",
         output_root=tmp_path,
         on_event=on_event,
     )
@@ -247,6 +248,7 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
     assert received["note_mode"] == "technical"
     assert received["extra_instruction"] == "重点解释原理。"
     assert received["cookies_from_browser"] == "chrome"
+    assert received["asr_language"] == "en"
     assert received["on_event"] is on_event
     assert events == ["单P事件"]
     assert isinstance(result, web_service.WebGenerationResult)
@@ -256,6 +258,69 @@ def test_generate_notes_dispatches_single_part_to_pipeline(
     assert result.parts[0].markdown == "# 视频主题\n单P笔记\n"
     assert result.parts[0].filename == output_path.name
     assert result.parts[0].transcript is video.transcript
+
+
+def test_generate_notes_defaults_web_asr_language_to_chinese(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collection = _collection(part_count=1)
+    output_path = tmp_path / "BV1DfrdByE2Hx_study_notes.md"
+    output_path.write_text("# 笔记\n", encoding="utf-8")
+    video = VideoSubtitle(
+        collection.bvid,
+        "视频",
+        "",
+        _transcript("字幕"),
+    )
+    received: dict[str, object] = {}
+
+    def fake_process(video_info, **kwargs):
+        received.update(kwargs)
+        return SinglePartReport(video, output_path)
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_process)
+
+    web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+        output_root=tmp_path,
+    )
+
+    assert received["asr_language"] == "zh"
+
+
+def test_generate_notes_without_output_root_cleans_temporary_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collection = _collection(part_count=1)
+    video = VideoSubtitle(
+        collection.bvid,
+        "视频",
+        "",
+        _transcript("字幕"),
+    )
+    received: dict[str, object] = {}
+
+    def fake_process(video_info, **kwargs):
+        output_root = kwargs["output_root"]
+        assert isinstance(output_root, Path)
+        received["output_root"] = output_root
+        output_path = output_root / "temporary_note.md"
+        output_path.write_text("# 临时笔记\n", encoding="utf-8")
+        return SinglePartReport(video, output_path)
+
+    monkeypatch.setattr(web_service, "process_single_part_video", fake_process)
+
+    result = web_service.generate_notes(
+        collection,
+        selected_parts=collection.parts,
+    )
+
+    temporary_root = received["output_root"]
+    assert isinstance(temporary_root, Path)
+    assert result.parts[0].markdown == "# 临时笔记\n"
+    assert not temporary_root.exists()
 
 
 def test_generate_notes_passes_segment_switch_and_reads_only_reported_file(

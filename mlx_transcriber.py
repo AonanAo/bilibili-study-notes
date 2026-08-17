@@ -7,8 +7,12 @@
 
 from __future__ import annotations
 
+import atexit
 from collections.abc import Callable, Mapping
+import os
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any
 
 from transcriber import (
@@ -26,11 +30,71 @@ DEFAULT_MLX_MODEL = "mlx-community/whisper-small-mlx"
 
 
 MlxTranscribeCallable = Callable[..., Mapping[str, object]]
+_FFMPEG_SHIM_DIR: Path | None = None
+
+
+def _ensure_ffmpeg_on_path() -> None:
+    """在当前进程中发现可选的 imageio-ffmpeg 二进制。
+
+    mlx-whisper 通过 PATH 调用 ffmpeg 读取压缩音频。系统已有 ffmpeg 时
+    保持原行为；否则尝试使用同一虚拟环境中已安装的 imageio-ffmpeg，避免
+    用户必须为字幕路径和 ASR 路径维护两套启动命令。找不到可选依赖时不在
+    这里抛错，后续引擎会给出具体的 ASR 失败原因。
+    """
+
+    if shutil.which("ffmpeg"):
+        return
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg_path = Path(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        return
+    if not ffmpeg_path.is_file():
+        return
+
+    global _FFMPEG_SHIM_DIR
+    if ffmpeg_path.name == "ffmpeg":
+        ffmpeg_dir = str(ffmpeg_path.parent)
+    else:
+        # imageio-ffmpeg 在 macOS 上常用带平台和版本的文件名；
+        # mlx-whisper 固定调用名为 ``ffmpeg``，所以创建进程级临时别名。
+        if _FFMPEG_SHIM_DIR is None:
+            shim_dir = Path(tempfile.mkdtemp(prefix="bilibili-ffmpeg-"))
+            try:
+                (shim_dir / "ffmpeg").symlink_to(ffmpeg_path)
+            except OSError:
+                shutil.rmtree(shim_dir, ignore_errors=True)
+                return
+            _FFMPEG_SHIM_DIR = shim_dir
+            atexit.register(shutil.rmtree, shim_dir, ignore_errors=True)
+        ffmpeg_dir = str(_FFMPEG_SHIM_DIR)
+
+    current_path = os.environ.get("PATH", "")
+    entries = current_path.split(os.pathsep) if current_path else []
+    if ffmpeg_dir not in entries:
+        os.environ["PATH"] = os.pathsep.join((ffmpeg_dir, *entries))
+
+
+def _keep_nonempty_segments(segments: list[object] | tuple[object, ...]) -> list[object]:
+    """丢弃引擎偶尔返回的空文本分段，保留其余时间轴。"""
+
+    kept: list[object] = []
+    for segment in segments:
+        if isinstance(segment, Mapping):
+            text = segment.get("text")
+        else:
+            text = getattr(segment, "text", None)
+        if isinstance(text, str) and not text.strip():
+            continue
+        kept.append(segment)
+    return kept
 
 
 def _load_mlx_transcribe() -> MlxTranscribeCallable:
     """延迟加载可选依赖，避免离线测试和普通安装受 Metal 影响。"""
 
+    _ensure_ffmpeg_on_path()
     try:
         import mlx_whisper
     except Exception as error:  # pragma: no cover - 依赖缺失由运行环境决定
@@ -87,7 +151,10 @@ class MlxWhisperTranscriber:
         if result_language is None and isinstance(detected_language, str):
             result_language = detected_language
 
-        return transcript_from_segments(segments, language=result_language)
+        return transcript_from_segments(
+            _keep_nonempty_segments(segments),
+            language=result_language,
+        )
 
 
 def create_mlx_transcriber() -> Transcriber:

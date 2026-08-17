@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 
+import mlx_transcriber
 from transcriber import (
     BenchmarkSample,
     InvalidTranscriptionError,
@@ -101,6 +105,44 @@ def test_benchmark_requires_at_least_one_sample(tmp_path: Path) -> None:
         benchmark_transcriber_reuse(lambda: object(), [])
 
 
+def test_uses_bundled_imageio_ffmpeg_when_system_ffmpeg_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ffmpeg_path = tmp_path / "ffmpeg-macos-aarch64-v7.1"
+    ffmpeg_path.write_bytes(b"fake ffmpeg")
+    original_path = tmp_path / "original-bin"
+    monkeypatch.setenv("PATH", str(original_path))
+    monkeypatch.setattr(mlx_transcriber.shutil, "which", lambda _name: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "imageio_ffmpeg",
+        SimpleNamespace(get_ffmpeg_exe=lambda: str(ffmpeg_path)),
+    )
+
+    mlx_transcriber._ensure_ffmpeg_on_path()
+
+    shim_dir = Path(os.environ["PATH"].split(os.pathsep)[0])
+    assert (shim_dir / "ffmpeg").is_symlink()
+    assert (shim_dir / "ffmpeg").resolve() == ffmpeg_path
+
+
+def test_mlx_loader_prepares_ffmpeg_before_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mlx_transcriber,
+        "_ensure_ffmpeg_on_path",
+        lambda: calls.append("prepared"),
+    )
+    fake_mlx = SimpleNamespace(transcribe=lambda *_args, **_kwargs: {})
+    monkeypatch.setitem(sys.modules, "mlx_whisper", fake_mlx)
+
+    assert mlx_transcriber._load_mlx_transcribe() is fake_mlx.transcribe
+    assert calls == ["prepared"]
+
+
 def test_mlx_adapter_converts_segments_without_exposing_engine_options(
     tmp_path: Path,
 ) -> None:
@@ -126,6 +168,31 @@ def test_mlx_adapter_converts_segments_without_exposing_engine_options(
             str(audio),
             {"path_or_hf_repo": DEFAULT_MLX_MODEL, "verbose": False},
         )
+    ]
+
+
+def test_mlx_adapter_ignores_empty_text_segments(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "part.m4a"
+    audio.write_bytes(b"audio")
+
+    def fake_transcribe(_audio_value: str, **_options: object) -> dict[str, object]:
+        return {
+            "language": "zh",
+            "segments": [
+                {"start": 0, "end": 1, "text": "有效内容"},
+                {"start": 1, "end": 2, "text": "   "},
+                {"start": 2, "end": 3, "text": "后续内容"},
+            ],
+        }
+
+    transcript = MlxWhisperTranscriber(transcribe_fn=fake_transcribe).transcribe(audio)
+
+    assert transcript.plain_text == "有效内容\n后续内容"
+    assert [(cue.start_seconds, cue.end_seconds) for cue in transcript.cues] == [
+        (0.0, 1.0),
+        (2.0, 3.0),
     ]
 
 

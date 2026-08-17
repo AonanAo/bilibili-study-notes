@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Callable
 
 from bilibili import (
@@ -40,6 +41,15 @@ from transcript import Transcript
 
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
+
+# 仅在字幕不可用、进入 ASR 回退时生效；有字幕时保持字幕优先。
+ASR_LANGUAGE_OPTIONS: tuple[tuple[str, str | None], ...] = (
+    ("中文", "zh"),
+    ("English", "en"),
+    ("日本語", "ja"),
+    ("한국어", "ko"),
+    ("自动识别", None),
+)
 
 
 @dataclass(frozen=True)
@@ -335,7 +345,65 @@ def generate_notes(
     note_template: ResolvedNoteTemplate | None = None,
     secondary_note_template: ResolvedNoteTemplate | None = None,
     cookies_from_browser: str | None = None,
-    output_root: Path = OUTPUT_DIR,
+    asr_language: str | None = "zh",
+    output_root: Path | None = None,
+    on_event: Callable[[str], None] | None = None,
+) -> WebGenerationResult:
+    """生成网页结果；默认只在本次请求的临时目录中保存中间文件。
+
+    返回值已经包含查看和下载所需的文本，因此临时目录会在函数返回前清理。
+    调用方显式传入 ``output_root`` 时保留持久化输出，便于测试或其他集成场景。
+    """
+
+    if output_root is not None:
+        return _generate_notes_to_root(
+            video_info,
+            selected_parts=selected_parts,
+            note_mode=note_mode,
+            extra_instruction=extra_instruction,
+            generate_collection_summary=generate_collection_summary,
+            generate_segmented_notes=generate_segmented_notes,
+            include_transcript_in_viewer=include_transcript_in_viewer,
+            note_template=note_template,
+            secondary_note_template=secondary_note_template,
+            cookies_from_browser=cookies_from_browser,
+            asr_language=asr_language,
+            output_root=output_root,
+            on_event=on_event,
+        )
+
+    with TemporaryDirectory(prefix="bilibili-web-notes-") as temp_dir:
+        return _generate_notes_to_root(
+            video_info,
+            selected_parts=selected_parts,
+            note_mode=note_mode,
+            extra_instruction=extra_instruction,
+            generate_collection_summary=generate_collection_summary,
+            generate_segmented_notes=generate_segmented_notes,
+            include_transcript_in_viewer=include_transcript_in_viewer,
+            note_template=note_template,
+            secondary_note_template=secondary_note_template,
+            cookies_from_browser=cookies_from_browser,
+            asr_language=asr_language,
+            output_root=Path(temp_dir),
+            on_event=on_event,
+        )
+
+
+def _generate_notes_to_root(
+    video_info: VideoCollection,
+    *,
+    selected_parts: tuple[VideoPart, ...],
+    note_mode: str | None = None,
+    extra_instruction: str | None = None,
+    generate_collection_summary: bool = False,
+    generate_segmented_notes: bool = False,
+    include_transcript_in_viewer: bool = True,
+    note_template: ResolvedNoteTemplate | None = None,
+    secondary_note_template: ResolvedNoteTemplate | None = None,
+    cookies_from_browser: str | None = None,
+    asr_language: str | None = "zh",
+    output_root: Path,
     on_event: Callable[[str], None] | None = None,
 ) -> WebGenerationResult:
     """把网页参数交给 pipeline，不在网页层复制字幕或模型调用逻辑。"""
@@ -348,6 +416,7 @@ def generate_notes(
         "note_mode": note_mode,
         "extra_instruction": extra_instruction,
         "cookies_from_browser": cookies_from_browser,
+        "asr_language": asr_language,
         "on_event": on_event,
     }
     if len(selected_parts) >= 2:

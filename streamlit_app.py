@@ -22,6 +22,14 @@ BROWSER_LABELS = {
     "safari": "Safari",
 }
 
+ASR_LANGUAGE_LABELS = {
+    language_code: label
+    for label, language_code in web_service.ASR_LANGUAGE_OPTIONS
+}
+ASR_LANGUAGE_CODES = tuple(
+    language_code for _label, language_code in web_service.ASR_LANGUAGE_OPTIONS
+)
+
 
 def _format_description_markdown(description: str) -> str:
     """保留简介换行，同时避免普通文本被 Markdown 识别成标题。"""
@@ -87,6 +95,10 @@ def _format_browser(browser: str | None) -> str:
     """显示网页 Cookie 浏览器选择的中文标签。"""
 
     return BROWSER_LABELS[browser]
+
+
+def _format_asr_language(language: str | None) -> str:
+    return ASR_LANGUAGE_LABELS[language]
 
 
 def _sync_template_section_state(
@@ -357,6 +369,13 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
         single_part_mode = not video_info.is_multi_part or (
             estimate_available and len(estimated_parts) == 1
         )
+        asr_language = st.selectbox(
+            "无字幕时的语音语言",
+            options=ASR_LANGUAGE_CODES,
+            index=0,
+            format_func=_format_asr_language,
+            help="只有在没有字幕或字幕需要登录时才使用；有字幕时始终优先使用字幕。",
+        )
         if single_part_mode:
             if video_info.is_multi_part:
                 selected_part = estimated_parts[0]
@@ -514,6 +533,7 @@ def render_generation_form(video_info: web_service.VideoCollection) -> None:
                 note_template=selected_template,
                 secondary_note_template=secondary_template,
                 cookies_from_browser=st.session_state.cookies_from_browser,
+                asr_language=asr_language,
                 on_event=show_event,
             )
         except web_service.PartSelectionError as error:
